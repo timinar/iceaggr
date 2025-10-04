@@ -8,10 +8,24 @@ A research project developing transformer models for precise angular reconstruct
 
 ## 🚀 Quick Start
 We use `uv` (the modern Python package manager) throughout the project for dependency management and running code (see [installing UV](#install-uv)).
+
+**First time setup:**
+```bash
+# 1. Sync dependencies
+uv sync
+
+# 2. Configure data paths
+cp src/iceaggr/data/data_config.template.yaml src/iceaggr/data/data_config.yaml
+# Edit data_config.yaml with your IceCube data path
+
+# 3. Run analysis scripts
+uv run python scripts/2029_09_08_pulse_statistics.py
+```
+
+**After first setup:**
 ```bash
 # Sync dependencies (run after pulling changes)
 uv sync
-
 
 # Run analysis scripts
 uv run python scripts/2029_09_08_pulse_statistics.py
