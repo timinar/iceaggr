@@ -427,27 +427,49 @@ import matplotlib.pyplot as plt
 ## Model Training
 ```
 
-### Testing
+### Testing & Benchmarking
 
 **Write tests for important functions:**
 ```python
-# tests/test_models.py
+# tests/unit/test_models.py
 import torch
 from iceaggr.models.dom_transformer import DOMTransformer
 
 def test_dom_transformer_forward():
     """Test DOM transformer handles variable-length sequences."""
-    model = DOMTransformer(d_model=128, nhead=8)
+    model = DOMTransformer(d_model=128, n_heads=8)
+    batch = create_mock_batch()
 
-    # Simulate 3 DOMs with different pulse counts: 5, 1, 20 pulses
-    pulses = torch.randn(26, 128)  # total pulses, features
-    dom_indices = torch.tensor([0]*5 + [1]*1 + [2]*20)
+    output, metadata = model(batch)
 
-    output = model(pulses, dom_indices)
-
-    assert output.shape == (3, 128)  # 3 DOM embeddings
+    assert output.shape[1] == 128  # d_model dimension
     assert not torch.isnan(output).any()
 ```
+
+**Two types of performance testing:**
+
+**1. Regression Tests** (`tests/benchmarks/`) - Run via pytest:
+```python
+# tests/benchmarks/test_dataloader_performance.py
+def test_dataloader_throughput():
+    """Ensure dataloader maintains >100 events/sec."""
+    loader = get_dataloader(batch_size=32)
+    throughput = measure_throughput(loader)
+    assert throughput > 100, f"Too slow: {throughput:.1f} events/sec"
+```
+
+**2. Exploratory Benchmarks** (`scripts/`) - Standalone scripts:
+```bash
+# Deep dive into performance characteristics
+uv run python scripts/benchmark_dom_packing.py
+
+# Generate plots/reports for analysis
+uv run python scripts/analyze_memory_scaling.py
+```
+
+**When to use which:**
+- **Use `tests/benchmarks/`** for: CI/CD gates, regression prevention, quick checks
+- **Use `scripts/`** for: Finding bottlenecks, scaling analysis, report generation
 
 ---
 

@@ -75,25 +75,31 @@ iceaggr/
 ├── src/iceaggr/              # Main code (importable package)
 │   ├── config/              # Configuration utilities (to be created)
 │   ├── data/                # DataLoaders with DOM grouping ✓
-│   ├── models/              # T1 and T2 transformer architectures (to be created)
+│   ├── models/              # T1 and T2 transformer architectures ✓
 │   ├── training/            # Training loops and utilities (to be created)
 │   └── utils/               # Logging utilities ✓
 ├── configs/                 # Experiment configurations (to be created)
 │   ├── experiment/          # Full experiment configs
 │   └── model/               # Model-specific configs
 ├── notes/                   # Design documentation (committed) ✓
-│   ├── 03_dom_aggregation_architecture.md    # Architecture design
-│   └── 04_flex_attention_benchmark_results.md # Benchmarking results
+│   ├── dom_aggregation_architecture.md         # Architecture design
+│   └── flex_attention_benchmark_results.md     # FlexAttention benchmarks
 ├── personal_notes/          # Personal notes, experiments (gitignored)
-├── scripts/                 # Standalone analysis/training scripts ✓
+│   └── 03_t1_memory_constraints.md             # T1 memory solution
+├── scripts/                 # Analysis & benchmarking scripts ✓
+│   ├── benchmark_*.py       # Exploratory performance analysis
+│   └── analyze_*.py         # Data/model analysis tools
 ├── notebooks/               # Jupyter notebooks for experiments
-├── tests/                   # Unit and integration tests ✓
+├── tests/                   # Automated tests ✓
+│   ├── unit/                # Unit tests (fast, isolated)
+│   ├── integration/         # Integration tests
+│   └── benchmarks/          # Performance regression tests (pytest)
 ├── src/iceaggr/data/data_config.yaml         # Local data paths (gitignored) ✓
 ├── src/iceaggr/data/data_config.template.yaml # Template for data paths ✓
 └── pyproject.toml           # Dependencies and project config ✓
 ```
 
-**Current state**: Data loading complete (✓). Design docs complete (✓). Next: Model implementation.
+**Current state**: T1 (DOM-level) complete (✓). Data loading complete (✓). Next: T2 implementation.
 
 ## Configuration Management
 
@@ -224,6 +230,54 @@ logger.error("Failed to load data")
 **Change level**: `get_logger(__name__, level=logging.DEBUG)`
 
 See `src/iceaggr/utils/logger_config.py` for implementation. Original by [Midori Kato](https://github.com/pomidori).
+
+## Benchmarking & Performance Testing
+
+The project distinguishes between two types of performance testing (see [.github/BENCHMARKING.md](.github/BENCHMARKING.md) for detailed guide):
+
+### 1. Performance Regression Tests (`tests/benchmarks/`)
+
+**Purpose**: Ensure performance doesn't degrade over time
+
+**Characteristics**:
+- Run via pytest: `uv run pytest tests/benchmarks/`
+- Assert performance requirements (e.g., "must process >100 events/sec")
+- Part of CI/CD pipeline (future)
+- Fast execution (<5 min total)
+- Named: `test_*.py` or `benchmark_*.py`
+
+**Example**:
+```python
+def test_dataloader_throughput():
+    """Ensure dataloader maintains >100 events/sec."""
+    loader = get_dataloader(batch_size=32)
+    throughput = measure_throughput(loader)
+    assert throughput > 100, f"Throughput {throughput:.1f} events/sec too slow"
+```
+
+### 2. Exploratory Benchmarks (`scripts/`)
+
+**Purpose**: Understand performance characteristics, find bottlenecks, generate reports
+
+**Characteristics**:
+- Standalone scripts: `uv run python scripts/benchmark_*.py`
+- Generate detailed reports, plots, analysis
+- Not part of automated testing
+- Can run for extended periods (hours)
+- Named: `benchmark_*.py`, `analyze_*.py`
+
+**Example**: `scripts/benchmark_dom_packing.py` - Tests extreme events, generates memory reports
+
+### When to Use Which
+
+| Scenario | Location | Run Via |
+|----------|----------|---------|
+| Ensure model forward pass stays fast | `tests/benchmarks/` | `pytest` |
+| Find memory bottleneck in new feature | `scripts/` | Direct execution |
+| CI/CD performance gate | `tests/benchmarks/` | `pytest` |
+| Generate plots for paper/report | `scripts/` | Direct execution |
+| Regression test for data loading | `tests/benchmarks/` | `pytest` |
+| Explore scaling behavior | `scripts/` | Direct execution |
 
 ## Development Workflow
 

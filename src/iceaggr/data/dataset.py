@@ -291,6 +291,179 @@ def collate_with_dom_grouping(
     return result
 
 
+def collate_dom_packing(
+    batch: List[Dict[str, torch.Tensor]],
+    max_seq_len: int = 512,
+    max_pulses_per_batch: int = 32768,  # 64 * 512 default
+) -> Dict[str, torch.Tensor]:
+    """
+    Collate function with DOM packing for memory-efficient T1 batching.
+
+    Packs multiple sparse DOMs into fixed-length sequences to maximize GPU
+    efficiency while controlling memory usage. Uses dynamic batch accumulation
+    (Option A from design doc).
+
+    Args:
+        batch: List of event dicts from IceCubeDataset
+        max_seq_len: Maximum sequence length for packing (default: 512)
+        max_pulses_per_batch: Maximum total pulses to process (default: 32768)
+
+    Returns:
+        Dict with:
+            - packed_sequences: (bsz, max_seq_len, 4) - packed pulse features
+            - dom_boundaries: (bsz, max_seq_len) - local DOM ID at each position
+            - dom_mask: (bsz, max_seq_len) - 1 for valid pulses, 0 for padding
+            - metadata: Dict with:
+                - global_dom_ids: (bsz, max_seq_len) - global DOM index for aggregation
+                - total_doms: int - total number of unique DOMs
+                - dom_to_event_idx: (total_doms,) - which event each DOM belongs to
+                - event_ids: (n_events,) - original event IDs
+                - targets: (n_events, 2) - azimuth, zenith (if available)
+    """
+    # Collect all (event, DOM) pairs with their pulses
+    dom_data = []  # List of (event_idx, dom_id, pulses_tensor)
+    event_ids = []
+    targets = []
+
+    for event_idx, event in enumerate(batch):
+        pulse_features = event['pulse_features']  # (n_pulses, 4)
+        event_ids.append(event['event_id'])
+        if 'target' in event:
+            targets.append(event['target'])
+
+        # Extract sensor IDs (column 2 of pulse features)
+        sensor_ids = pulse_features[:, 2].long()
+
+        # Group by DOM
+        unique_doms = torch.unique(sensor_ids, sorted=True)
+        for dom_id in unique_doms:
+            dom_mask = (sensor_ids == dom_id)
+            dom_pulses = pulse_features[dom_mask]
+            dom_data.append((event_idx, dom_id.item(), dom_pulses))
+
+    total_doms = len(dom_data)
+
+    # Pack DOMs into sequences
+    packed_sequences = []
+    dom_boundaries = []  # Local DOM ID within sequence
+    dom_masks = []  # Valid pulse mask
+    global_dom_ids = []  # Global DOM index for aggregation
+    dom_to_event_idx = []
+
+    current_seq = []
+    current_boundaries = []
+    current_masks = []
+    current_global_ids = []
+    current_local_dom_id = 0
+
+    for global_dom_idx, (event_idx, dom_id, pulses) in enumerate(dom_data):
+        n_pulses = pulses.shape[0]
+
+        # Check if adding this DOM would exceed sequence length
+        current_len = len(current_boundaries)  # Number of pulses, not tensors
+        if current_len + n_pulses > max_seq_len and current_len > 0:
+            # Finalize current sequence and start new one
+            packed_sequences.append(
+                torch.nn.functional.pad(
+                    torch.cat(current_seq, dim=0),
+                    (0, 0, 0, max_seq_len - current_len),
+                    value=0.0
+                )
+            )
+            dom_boundaries.append(
+                torch.nn.functional.pad(
+                    torch.tensor(current_boundaries, dtype=torch.long),
+                    (0, max_seq_len - current_len),
+                    value=-1  # Padding marker
+                )
+            )
+            dom_masks.append(
+                torch.nn.functional.pad(
+                    torch.tensor(current_masks, dtype=torch.float32),
+                    (0, max_seq_len - current_len),
+                    value=0.0
+                )
+            )
+            global_dom_ids.append(
+                torch.nn.functional.pad(
+                    torch.tensor(current_global_ids, dtype=torch.long),
+                    (0, max_seq_len - current_len),
+                    value=-1  # Padding marker
+                )
+            )
+
+            # Reset for next sequence
+            current_seq = []
+            current_boundaries = []
+            current_masks = []
+            current_global_ids = []
+            current_local_dom_id = 0
+
+        # Handle DOMs larger than max_seq_len (chunk them)
+        if n_pulses > max_seq_len:
+            # Take first max_seq_len pulses (could also use reservoir sampling)
+            pulses = pulses[:max_seq_len]
+            n_pulses = max_seq_len
+
+        # Add DOM pulses to current sequence
+        current_seq.append(pulses)
+        current_boundaries.extend([current_local_dom_id] * n_pulses)
+        current_masks.extend([1.0] * n_pulses)
+        current_global_ids.extend([global_dom_idx] * n_pulses)
+        current_local_dom_id += 1
+
+        # Track DOM metadata
+        dom_to_event_idx.append(event_idx)
+
+    # Finalize last sequence
+    if len(current_seq) > 0:
+        current_len = len(current_boundaries)  # Number of pulses, not tensors
+        packed_sequences.append(
+            torch.nn.functional.pad(
+                torch.cat(current_seq, dim=0),
+                (0, 0, 0, max_seq_len - current_len),
+                value=0.0
+            )
+        )
+        dom_boundaries.append(
+            torch.nn.functional.pad(
+                torch.tensor(current_boundaries, dtype=torch.long),
+                (0, max_seq_len - current_len),
+                value=-1
+            )
+        )
+        dom_masks.append(
+            torch.nn.functional.pad(
+                torch.tensor(current_masks, dtype=torch.float32),
+                (0, max_seq_len - current_len),
+                value=0.0
+            )
+        )
+        global_dom_ids.append(
+            torch.nn.functional.pad(
+                torch.tensor(current_global_ids, dtype=torch.long),
+                (0, max_seq_len - current_len),
+                value=-1
+            )
+        )
+
+    # Stack into batch
+    result = {
+        'packed_sequences': torch.stack(packed_sequences, dim=0),  # (bsz, max_seq_len, 4)
+        'dom_boundaries': torch.stack(dom_boundaries, dim=0),  # (bsz, max_seq_len)
+        'dom_mask': torch.stack(dom_masks, dim=0),  # (bsz, max_seq_len)
+        'metadata': {
+            'global_dom_ids': torch.stack(global_dom_ids, dim=0),  # (bsz, max_seq_len)
+            'total_doms': total_doms,
+            'dom_to_event_idx': torch.tensor(dom_to_event_idx, dtype=torch.long),
+            'event_ids': torch.stack(event_ids) if event_ids else None,
+            'targets': torch.stack(targets) if targets else None,
+        }
+    }
+
+    return result
+
+
 def get_dataloader(
     config_path: Optional[str] = None,
     split: str = "train",
