@@ -81,15 +81,19 @@ iceaggr/
 ├── configs/                 # Experiment configurations (to be created)
 │   ├── experiment/          # Full experiment configs
 │   └── model/               # Model-specific configs
+├── notes/                   # Design documentation (committed) ✓
+│   ├── 03_dom_aggregation_architecture.md    # Architecture design
+│   └── 04_flex_attention_benchmark_results.md # Benchmarking results
+├── personal_notes/          # Personal notes, experiments (gitignored)
 ├── scripts/                 # Standalone analysis/training scripts ✓
-├── notebooks/               # Jupyter notebooks for experiments (to be created)
-├── tests/                   # Unit and integration tests (to be created)
+├── notebooks/               # Jupyter notebooks for experiments
+├── tests/                   # Unit and integration tests ✓
 ├── src/iceaggr/data/data_config.yaml         # Local data paths (gitignored) ✓
 ├── src/iceaggr/data/data_config.template.yaml # Template for data paths ✓
 └── pyproject.toml           # Dependencies and project config ✓
 ```
 
-**Current state**: Data loading complete (✓). Next: Model implementation.
+**Current state**: Data loading complete (✓). Design docs complete (✓). Next: Model implementation.
 
 ## Configuration Management
 
