@@ -20,9 +20,9 @@ model:
 training:
   # Data
   max_events: 1000000  # 1M events
-  batch_size: 32
+  batch_size: 128  # Increased from 32 for better GPU utilization
   val_split: 0.1
-  num_workers: 4
+  num_workers: 8  # Increased from 4 for faster data loading
 
   # Optimization
   num_epochs: 20
