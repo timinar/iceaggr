@@ -12,7 +12,8 @@ import json
 import yaml
 
 # Load data paths from config
-with open("data_config.yaml") as f:
+config_path = Path(__file__).parent.parent / "src/iceaggr/data/data_config.yaml"
+with open(config_path) as f:
     config = yaml.safe_load(f)
 DATA_DIR = Path(config["data"]["root"])
 

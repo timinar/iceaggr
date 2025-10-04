@@ -81,8 +81,8 @@ iceaggr/
 ├── scripts/                 # Standalone analysis/training scripts ✓
 ├── notebooks/               # Jupyter notebooks for experiments (to be created)
 ├── tests/                   # Unit and integration tests (to be created)
-├── data_config.yaml         # Local data paths (gitignored) ✓
-├── data_config.template.yaml # Template for data paths ✓
+├── src/iceaggr/data/data_config.yaml         # Local data paths (gitignored) ✓
+├── src/iceaggr/data/data_config.template.yaml # Template for data paths ✓
 └── pyproject.toml           # Dependencies and project config ✓
 ```
 
@@ -92,10 +92,10 @@ iceaggr/
 
 The project uses a simple two-tier config approach:
 
-1. **Data paths** (`data_config.yaml` in root):
+1. **Data paths** (`src/iceaggr/data/data_config.yaml` in root):
    - Gitignored, local to each user
    - Contains **only data paths** (train, test directories)
-   - Copy from `data_config.template.yaml` and modify
+   - Copy from `src/iceaggr/data/data_config.template.yaml` and modify
    - Example:
      ```yaml
      data:
@@ -114,13 +114,13 @@ Load data config in code:
 ```python
 import yaml
 
-with open("data_config.yaml") as f:
+with open("src/iceaggr/data/data_config.yaml") as f:
     config = yaml.safe_load(f)
 
 train_path = config["data"]["train"]
 ```
 
-**Important**: All scripts should use `data_config.yaml` for data paths, not hardcoded paths!
+**Important**: All scripts should use `src/iceaggr/data/data_config.yaml` for data paths, not hardcoded paths!
 
 ## Data Architecture
 

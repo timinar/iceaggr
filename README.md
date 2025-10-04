@@ -103,12 +103,12 @@ iceaggr/
 ├── notebooks/               # Jupyter notebooks for exploration
 ├── scripts/                 # Standalone scripts (analysis, training)
 ├── tests/                   # Unit and integration tests
-├── data_config.yaml         # Local data paths (gitignored)
-├── data_config.template.yaml # Template for data paths
 └── pyproject.toml           # Project dependencies and settings
 ```
 
-**Note**: Core package structure (`src/`, `tests/`, `notebooks/`, `configs/`) will be created as development progresses.
+**Notes**:
+- Core package structure (`src/`, `tests/`, `notebooks/`, `configs/`) will be created as development progresses
+- `data_config.yaml` lives in `src/iceaggr/data/` (gitignored, copy from template)
 
 ## 🧪 Current Progress
 

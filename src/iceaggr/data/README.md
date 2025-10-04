@@ -9,7 +9,7 @@ from iceaggr.data import get_dataloader
 
 # Create DataLoader
 dataloader = get_dataloader(
-    config_path="data_config.yaml",
+    config_path="src/iceaggr/data/data_config.yaml",
     split="train",
     batch_size=32,
     shuffle=True,
@@ -70,7 +70,7 @@ event_lengths         # [10, 5, 8]
 
 ```python
 dataset = IceCubeDataset(
-    config_path="data_config.yaml",  # Path to data config
+    config_path="src/iceaggr/data/data_config.yaml",  # Path to data config
     split="train",              # "train" or "test"
     max_events=None,            # Limit events (for testing)
     cache_size=1,               # Number of batch files to cache
@@ -83,7 +83,7 @@ event = dataset[idx]  # Get single event
 
 ```python
 dataloader = get_dataloader(
-    config_path="data_config.yaml",
+    config_path="src/iceaggr/data/data_config.yaml",
     split="train",
     batch_size=32,
     shuffle=True,

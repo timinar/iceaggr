@@ -40,14 +40,17 @@ class IceCubeDataset(Dataset):
 
     def __init__(
         self,
-        config_path: str = "data_config.yaml",
+        config_path: Optional[str] = None,
         split: str = "train",
         max_events: Optional[int] = None,
         cache_size: int = 1,
     ):
         assert split in ["train", "test"], f"split must be 'train' or 'test', got {split}"
 
-        # Load config
+        # Load config - default to data_config.yaml in this directory
+        if config_path is None:
+            config_path = Path(__file__).parent / "data_config.yaml"
+
         with open(config_path) as f:
             config = yaml.safe_load(f)
 
@@ -196,7 +199,7 @@ def collate_variable_length(
 
 
 def get_dataloader(
-    config_path: str = "data_config.yaml",
+    config_path: Optional[str] = None,
     split: str = "train",
     batch_size: int = 32,
     shuffle: bool = True,
@@ -207,7 +210,7 @@ def get_dataloader(
     Create a DataLoader for IceCube events.
 
     Args:
-        config_path: Path to data_config.yaml
+        config_path: Path to data_config.yaml (defaults to src/iceaggr/data/data_config.yaml)
         split: 'train' or 'test'
         batch_size: Number of events per batch
         shuffle: Whether to shuffle events
