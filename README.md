@@ -4,122 +4,43 @@
 
 A research project developing transformer models for precise angular reconstruction of high-energy neutrino events in IceCube, using DOM-level pulse aggregation to handle events with thousands of pulses.
 
+> **New to the project?** See setup instructions for [installing UV](#install-uv) and [downloading IceCube data](#download-icecube-kaggle-data) at the end of this README.
+
 ## 🚀 Quick Start
-
-### Prerequisites
-- Git installed on your system
-- Terminal/command line access
-
-### 1. Install UV (the modern Python package manager)
+We use `uv` throughout the project for dependency management and running code (see [installing UV](#install-uv)).
 ```bash
-# Install UV - works on Windows, Mac, and Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# On Windows, use PowerShell:
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-# Restart your terminal or run:
-source $HOME/.local/bin/env
-```
-
-### 2. Clone and Setup
-```bash
-# Clone the repository
-git clone https://github.com/timinar/iceaggr.git
-cd iceaggr
-
-# UV automatically handles everything - Python version, virtual environment, dependencies!
+# Sync dependencies (run after pulling changes)
 uv sync
-```
 
-That's it! No need to manage virtual environments or install Python manually.
-
-### 3. Download IceCube Kaggle Data
-
-First, install the Kaggle CLI and authenticate:
-```bash
-# Install kaggle CLI (already in dependencies if you ran uv sync)
-uv add kaggle
-
-# Authenticate - get your API token from kaggle.com/USERNAME/account
-# Create ~/.kaggle/kaggle.json with your credentials:
-mkdir -p ~/.kaggle
-# Download from: https://www.kaggle.com/settings → API → Create New Token
-chmod 600 ~/.kaggle/kaggle.json
-```
-
-Download and extract the data:
-```bash
-# Download competition data (~20GB compressed)
-kaggle competitions download -c icecube-neutrinos-in-deep-ice
-
-# Unzip (creates train/ and test/ directories)
-unzip icecube-neutrinos-in-deep-ice.zip -d data/
-```
-
-
-## 🎯 Usage
-
-### Running Jupyter Notebooks
-```bash
-# Start Jupyter Lab for exploration
+# Start exploring
 uv run jupyter lab
 
-# Or traditional Jupyter notebook
-uv run jupyter notebook
+# Run analysis scripts
+uv run python scripts/2029_09_08_pulse_statistics.py
 ```
 
-### Running Training Scripts
+## 🎯 Common Commands
+
 ```bash
-# Run a training script
-uv run python scripts/train_model.py
+# Jupyter notebooks
+uv run jupyter lab
 
-# Run with specific config (once we add Hydra)
-uv run python scripts/train_model.py --config configs/bert_baseline.yaml
-```
+# Run scripts
+uv run python scripts/your_script.py
 
-### Running Tests
-```bash
-# Run all tests
-uv run pytest
+# Testing
+uv run pytest                    # All tests
+uv run pytest --cov=src/iceaggr  # With coverage
 
-# Run only unit tests (fast)
-uv run pytest tests/unit/
+# Code quality
+uv run ruff format .             # Format code
+uv run ruff check .              # Check for issues
+uv run mypy src/                 # Type checking
 
-# Run only integration tests (slower, requires data)
-uv run pytest tests/integration/
-
-# Run with coverage report
-uv run pytest --cov=src/iceaggr
-```
-
-### Adding New Dependencies
-```bash
-# Add a new package for everyone
-uv add scikit-image  # Adds to main dependencies
-
-# Add a development tool
-uv add --dev black   # Adds to dev dependencies
-
-# The changes are saved to pyproject.toml - commit this file!
-# Other users (including on HPC clusters) get the new packages by running:
-uv sync
-```
-
-## 📁 Project Structure
-
-```
-iceaggr/
-├── src/iceaggr/           # Main code (importable package)
-│   ├── config/           # YAML feature configurations
-│   ├── data/             # Data loading code (DataLoaders, etc.)
-│   ├── models/           # Model architectures 
-│   ├── training/         # Training loops and utilities
-│   └── utils/            # Utilities (logging, etc.)
-├── notebooks/            # Jupyter notebooks for experiments
-├── scripts/             # Standalone scripts (training, evaluation)
-├── tests/              # Unit tests
-└── pyproject.toml      # Project configuration (dependencies, tools)
+# Dependencies
+uv add package-name              # Add new package
+uv add --dev dev-tool            # Add dev dependency
+uv sync                          # Install/update all dependencies
 ```
 
 ## 🎯 Project Overview
@@ -181,83 +102,87 @@ Pulses → [DOM-level Transformer (T1)] → DOM embeddings → [Event-level Tran
 
 ## 🤝 Contributing
 
-**New to the project?** Check out [CONTRIBUTING.md](CONTRIBUTING.md) for our complete workflow guide.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for complete workflow guide.
 
-**Quick contribution steps:**
-1. Create a new branch: `git checkout -b experiment/your-idea`
-2. Make your changes and test them
-3. Commit: `git commit -m "Add transformer attention mechanism"`
-4. Push: `git push origin experiment/your-idea`
-5. Create a Pull Request on GitHub
+**Quick workflow:**
+```bash
+git checkout main && git pull && uv sync    # Start with latest
+git checkout -b experiment/your-idea         # Create branch
+# ... make changes ...
+uv run pytest && uv run ruff check .         # Test
+git commit -m "Add feature"                  # Commit
+git push origin experiment/your-idea         # Push & create PR
+```
 
-## 📊 Weights & Biases Integration
+## 📊 Experiment Tracking
 
-We use Weights & Biases for experiment tracking:
+We use Weights & Biases:
 
 ```python
 import wandb
-
-# Login (first time only)
-wandb.login()
-
-# In your training script
-wandb.init(project="iceaggr", name="dom-transformer-v1")
+wandb.init(project="iceaggr", name="dom-transformer-v1-yourname")
+wandb.log({"loss": loss, "angular_error": error})
 ```
 
-## 🔬 Development Tools
+## 📚 Resources
 
-We use modern Python tooling for code quality:
+- [IceCube Competition](https://www.kaggle.com/competitions/icecube-neutrinos-in-deep-ice)
+- [PyTorch FlexAttention](https://pytorch.org/blog/flexattention/)
+- [PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/)
+- [Weights & Biases](https://docs.wandb.ai/)
+- [UV Documentation](https://docs.astral.sh/uv/)
+
+---
+
+## 🔧 Setup Instructions
+
+### Install UV
+
+<details>
+<summary>Click to expand UV installation instructions</summary>
 
 ```bash
-# Format code automatically
-uv run ruff format .
+# Mac/Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Check for issues
-uv run ruff check .
+# Windows (PowerShell)
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# Run type checking
-uv run mypy src/
-```
-
-## 📚 Useful Resources
-
-- **IceCube Kaggle Competition**: [Competition Page](https://www.kaggle.com/competitions/icecube-neutrinos-in-deep-ice)
-- **PyTorch FlexAttention**: [Tutorial](https://pytorch.org/blog/flexattention/)
-- **PyTorch Lightning**: [Documentation](https://lightning.ai/docs/pytorch/stable/)
-- **Weights & Biases**: [Guides](https://docs.wandb.ai/)
-- **UV Documentation**: [User Guide](https://docs.astral.sh/uv/)
-- **IceCube Detector**: [Description](https://icecube.wisc.edu/science/icecube/)
-
-## ❓ FAQ
-
-### "UV isn't recognized as a command"
-Make sure to restart your terminal after installation, or run:
-```bash
+# Restart your terminal or run:
 source $HOME/.local/bin/env
 ```
 
-### "I want to use my own Python installation"
-UV manages Python for you, but if needed:
+Then clone and setup:
 ```bash
-uv venv --python /path/to/your/python
+git clone https://github.com/timinar/iceaggr.git
+cd iceaggr
+uv sync
 ```
 
-### "How do I update dependencies?"
+</details>
+
+### Download IceCube Kaggle Data
+
+<details>
+<summary>Click to expand data download instructions</summary>
+
+Install Kaggle CLI and authenticate:
 ```bash
-uv sync --upgrade  # Updates all packages to latest compatible versions
+uv add kaggle
+
+# Get API token from kaggle.com/settings → API → Create New Token
+mkdir -p ~/.kaggle
+# Save credentials to ~/.kaggle/kaggle.json
+chmod 600 ~/.kaggle/kaggle.json
 ```
 
-### "Can I still use pip?"
-While UV handles everything, you can still use pip inside the UV environment:
+Download data:
 ```bash
-uv run pip install some-package
+kaggle competitions download -c icecube-neutrinos-in-deep-ice
+unzip icecube-neutrinos-in-deep-ice.zip -d data/
 ```
 
-## 🐛 Issues?
-
-- Check [CONTRIBUTING.md](CONTRIBUTING.md) for common solutions
-- Open an issue on GitHub
-- Ask in our team chat
+</details>
 
 ---
 
