@@ -450,6 +450,17 @@ def collate_dom_packing(
         )
 
     # Stack into batch
+    # Convert targets from angles (azimuth, zenith) to unit vectors (x, y, z)
+    targets_tensor = None
+    if targets:
+        angles_tensor = torch.stack(targets)  # (n_events, 2) - azimuth, zenith
+        azimuth = angles_tensor[:, 0]
+        zenith = angles_tensor[:, 1]
+
+        # Convert to unit vectors
+        from iceaggr.training import angles_to_unit_vector
+        targets_tensor = angles_to_unit_vector(azimuth, zenith)  # (n_events, 3)
+
     result = {
         'packed_sequences': torch.stack(packed_sequences, dim=0),  # (bsz, max_seq_len, 4)
         'dom_boundaries': torch.stack(dom_boundaries, dim=0),  # (bsz, max_seq_len)
@@ -460,7 +471,7 @@ def collate_dom_packing(
             'dom_to_event_idx': torch.tensor(dom_to_event_idx, dtype=torch.long),  # (total_doms,)
             'sensor_ids': torch.tensor(sensor_ids, dtype=torch.long),  # (total_doms,) - actual sensor IDs
             'event_ids': torch.stack(event_ids) if event_ids else None,
-            'targets': torch.stack(targets) if targets else None,
+            'targets': targets_tensor,  # (n_events, 3) - unit vectors
         }
     }
 

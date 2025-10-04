@@ -188,11 +188,7 @@ class EventTransformer(nn.Module):
         norm = torch.sqrt(torch.sum(vector**2, dim=1, keepdim=True))
         unit_vector = vector / (norm + 1e-8)  # (batch_size, 3)
 
-        # Convert to angles (azimuth, zenith) for compatibility with loss
-        from iceaggr.training import unit_vector_to_angles
-        predictions = unit_vector_to_angles(unit_vector)  # (batch_size, 2)
-
-        return predictions
+        return unit_vector  # Return unit vectors directly, not angles
 
     def _pack_events(
         self,

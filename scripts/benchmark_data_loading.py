@@ -161,8 +161,21 @@ def main():
     logger.info("Data Loading Bottleneck Analysis")
     logger.info("=" * 60)
 
-    # 1. Dataset creation
+    # 1. Dataset creation (use 1M events to match training!)
     dataset = benchmark_dataset_creation()
+
+    # Also benchmark with 1M events
+    logger.info("\n" + "=" * 60)
+    logger.info("Re-benchmarking with 1M events (training scale)...")
+    logger.info("=" * 60)
+
+    start = time.time()
+    dataset_1m = IceCubeDataset(split="train", max_events=1000000)
+    elapsed = time.time() - start
+    logger.info(f"Dataset creation (1M events): {elapsed:.2f}s")
+
+    # Use the 1M dataset for further benchmarks
+    dataset = dataset_1m
 
     # 2. Dataset __getitem__
     benchmark_getitem(dataset, n_samples=100)

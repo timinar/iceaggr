@@ -213,5 +213,10 @@ checkpoints/
 *.png
 *.pdf
 
+# Experiment artifacts (keep configs, ignore checkpoints/wandb)
+experiments/*/checkpoints/
+experiments/*/wandb/
+wandb/
+
 # Personal notes and experiments (keep local)
 personal_notes/

@@ -84,8 +84,8 @@ def unit_vector_to_angles(
     Returns:
         Angles (azimuth, zenith) in radians, shape (N, 2)
     """
-    norm = torch.sqrt(torch.sum(n**2, dim=1))
     if check_unit_norm:
+        norm = torch.sqrt(torch.sum(n**2, dim=1))
         assert torch.allclose(
             norm, torch.ones_like(norm)
         ), "Input vectors are not unit vectors"
@@ -93,8 +93,11 @@ def unit_vector_to_angles(
     x = n[:, 0]
     y = n[:, 1]
     z = n[:, 2]
+
     azimuth = torch.atan2(y, x)
-    zenith = torch.arccos(z / norm)
+    # Clamp z to [-1, 1] to avoid NaN from arccos due to floating point errors
+    # Input should already be unit vector, so z should be in [-1, 1]
+    zenith = torch.arccos(z.clamp(-1.0, 1.0))
     return torch.stack([azimuth, zenith], dim=1)
 
 
