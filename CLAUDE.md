@@ -49,8 +49,11 @@ uv sync --upgrade
 # Run Python scripts
 uv run python scripts/script_name.py
 
-# Start Jupyter Lab for notebooks
+# Start Jupyter Lab for notebooks (automatically uses correct Python kernel)
 uv run jupyter lab
+
+# IMPORTANT: In notebooks, the iceaggr package is available after running `uv sync`
+# The kernel "Python 3 (ipykernel)" uses the UV environment automatically
 
 # Run tests
 uv run pytest                    # All tests
@@ -74,7 +77,7 @@ iceaggr/
 │   ├── data/                # DataLoaders with DOM grouping ✓
 │   ├── models/              # T1 and T2 transformer architectures (to be created)
 │   ├── training/            # Training loops and utilities (to be created)
-│   └── utils/               # Logging, metrics, etc. (to be created)
+│   └── utils/               # Logging utilities ✓
 ├── configs/                 # Experiment configurations (to be created)
 │   ├── experiment/          # Full experiment configs
 │   └── model/               # Model-specific configs
@@ -198,6 +201,26 @@ From the data analysis, keep in mind:
 3. **Memory planning**: Batch size 32 at 99th percentile events is manageable, but worst-case can OOM
 4. **Special handling needed**: Events >100K pulses may need reservoir sampling or splitting
 
+## Logging
+
+Use the project's color-coded logger for consistent output:
+
+```python
+from iceaggr.utils import get_logger
+
+logger = get_logger(__name__)
+logger.info("Loading batch 42")
+logger.debug("Batch shape: (32, 128, 4)")
+logger.warning("Cache miss for batch 99")
+logger.error("Failed to load data")
+```
+
+**Log levels**: DEBUG (blue), INFO (green), WARNING (yellow), ERROR (red)
+
+**Change level**: `get_logger(__name__, level=logging.DEBUG)`
+
+See `src/iceaggr/utils/logger_config.py` for implementation. Original by [Midori Kato](https://github.com/pomidori).
+
 ## Development Workflow
 
 1. **Always start with**: `git checkout main && git pull && uv sync`
@@ -205,16 +228,43 @@ From the data analysis, keep in mind:
 3. **Test before committing**: Run `uv run pytest && uv run ruff check .`
 4. **Commit with context**: Explain why, not just what
 5. **Track experiments**: Use W&B for all training runs
+6. **Use logging**: Replace `print()` with `logger.info()` in all code
 
 ## Key Technologies
 
 - **PyTorch**: Deep learning framework
 - **PyTorch FlexAttention**: For variable-length sequence handling in transformers
 - **PyTorch Lightning**: Training framework (to be added)
-- **Polars**: Fast dataframe operations for analysis
+- **Polars / PyArrow**: Fast dataframe operations for analysis (NOT pandas - too slow!)
 - **UV**: Python package and environment manager
 - **Weights & Biases**: Experiment tracking
 - **Ruff**: Code formatting and linting
+
+## Data Analysis Best Practices
+
+**IMPORTANT**: Avoid pandas for large-scale data analysis. Use Polars or PyArrow instead.
+
+```python
+# ✅ GOOD: Use Polars for dataframes
+import polars as pl
+df = pl.read_parquet("data.parquet")
+df = df.filter(pl.col("value") > 10)
+
+# ✅ GOOD: Use PyArrow for columnar data
+import pyarrow.parquet as pq
+table = pq.read_table("data.parquet")
+
+# ❌ BAD: Avoid pandas (10-100x slower)
+import pandas as pd  # Don't use this!
+```
+
+**Why?**
+- Polars is 10-100x faster than pandas
+- PyArrow has zero-copy operations
+- IceCube data is large (~20GB) - pandas will be painfully slow
+- Polars has better memory efficiency
+
+**When to use pandas**: Only for small results tables (<1000 rows) or final output formatting
 
 ## Git Configuration Notes
 

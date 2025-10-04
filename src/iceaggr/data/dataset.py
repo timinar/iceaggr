@@ -202,6 +202,95 @@ def collate_variable_length(
     return result
 
 
+def collate_with_dom_grouping(
+    batch: List[Dict[str, torch.Tensor]]
+) -> Dict[str, torch.Tensor]:
+    """
+    Collate function that groups pulses by DOM for hierarchical transformer.
+
+    Creates pulse_to_dom_idx mapping where each (event, DOM) pair gets a unique index.
+    This is the correct grouping for T1 (DOM-level) transformer.
+
+    Args:
+        batch: List of event dicts from IceCubeDataset
+
+    Returns:
+        Dict with:
+            - pulse_features: (total_pulses, 4) - all pulses flattened
+            - pulse_to_dom_idx: (total_pulses,) - which DOM each pulse belongs to
+            - dom_pulse_counts: (total_doms,) - number of pulses per DOM
+            - dom_to_event_idx: (total_doms,) - which event each DOM belongs to
+            - dom_ids: (total_doms,) - original sensor IDs
+            - event_dom_counts: (batch_size,) - number of DOMs per event
+            - targets: (batch_size, 2) - azimuth, zenith (if available)
+            - event_ids: (batch_size,) - event IDs
+    """
+    batch_size = len(batch)
+
+    all_pulse_features = []
+    pulse_to_dom_idx_list = []
+    dom_pulse_counts = []
+    dom_to_event_idx = []
+    dom_ids = []
+    event_dom_counts = []
+
+    current_dom_idx = 0
+
+    for event_idx, event in enumerate(batch):
+        pulse_features = event['pulse_features']  # (n_pulses, 4)
+        n_pulses = pulse_features.shape[0]
+
+        # Extract sensor IDs (column 2 of pulse features)
+        sensor_ids = pulse_features[:, 2].long()
+
+        # Find unique DOMs in this event
+        unique_doms = torch.unique(sensor_ids, sorted=True)
+        n_doms_in_event = len(unique_doms)
+        event_dom_counts.append(n_doms_in_event)
+
+        # Group pulses by DOM
+        for dom_id in unique_doms:
+            # Find pulses belonging to this DOM
+            dom_mask = (sensor_ids == dom_id)
+            dom_pulses = pulse_features[dom_mask]
+            n_pulses_in_dom = dom_pulses.shape[0]
+
+            # Add to batch
+            all_pulse_features.append(dom_pulses)
+            dom_pulse_counts.append(n_pulses_in_dom)
+            dom_to_event_idx.append(event_idx)
+            dom_ids.append(dom_id.item())
+
+            # Track which DOM index each pulse belongs to
+            pulse_to_dom_idx_list.extend([current_dom_idx] * n_pulses_in_dom)
+
+            current_dom_idx += 1
+
+    # Stack everything
+    result = {
+        # Pulse-level (for T1)
+        'pulse_features': torch.cat(all_pulse_features, dim=0),  # (total_pulses, 4)
+        'pulse_to_dom_idx': torch.tensor(pulse_to_dom_idx_list, dtype=torch.long),
+        'dom_pulse_counts': torch.tensor(dom_pulse_counts, dtype=torch.long),
+
+        # DOM-level metadata (for T2)
+        'dom_to_event_idx': torch.tensor(dom_to_event_idx, dtype=torch.long),
+        'dom_ids': torch.tensor(dom_ids, dtype=torch.long),
+        'event_dom_counts': torch.tensor(event_dom_counts, dtype=torch.long),
+
+        # Event-level
+        'event_ids': torch.stack([b['event_id'] for b in batch]),
+        'total_doms': current_dom_idx,
+        'batch_size': batch_size
+    }
+
+    # Add targets if available
+    if 'target' in batch[0]:
+        result['targets'] = torch.stack([b['target'] for b in batch])
+
+    return result
+
+
 def get_dataloader(
     config_path: Optional[str] = None,
     split: str = "train",
@@ -209,6 +298,7 @@ def get_dataloader(
     shuffle: bool = True,
     num_workers: int = 0,
     max_events: Optional[int] = None,
+    collate_fn: str = "variable_length",
 ) -> torch.utils.data.DataLoader:
     """
     Create a DataLoader for IceCube events.
@@ -220,6 +310,7 @@ def get_dataloader(
         shuffle: Whether to shuffle events
         num_workers: Number of worker processes (0 = single process)
         max_events: Optional limit on number of events
+        collate_fn: "variable_length" or "dom_grouping"
 
     Returns:
         DataLoader with continuous batching collate function
@@ -228,12 +319,20 @@ def get_dataloader(
         config_path=config_path, split=split, max_events=max_events
     )
 
+    # Select collate function
+    if collate_fn == "variable_length":
+        collate_func = collate_variable_length
+    elif collate_fn == "dom_grouping":
+        collate_func = collate_with_dom_grouping
+    else:
+        raise ValueError(f"Unknown collate_fn: {collate_fn}. Use 'variable_length' or 'dom_grouping'")
+
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        collate_fn=collate_variable_length,
+        collate_fn=collate_func,
         pin_memory=True,  # Faster GPU transfer
     )
 
