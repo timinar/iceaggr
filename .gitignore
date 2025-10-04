@@ -212,3 +212,6 @@ logs/
 checkpoints/
 *.png
 *.pdf
+
+# Notes and experiments (keep local)
+notes/
