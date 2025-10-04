@@ -3,5 +3,6 @@ iceaggr.models - Neural network architectures for IceCube neutrino reconstructio
 """
 
 from .dom_transformer import DOMTransformer
+from .event_transformer import EventTransformer, EventAccumulator
 
-__all__ = ["DOMTransformer"]
+__all__ = ["DOMTransformer", "EventTransformer", "EventAccumulator"]

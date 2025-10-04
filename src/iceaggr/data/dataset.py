@@ -349,6 +349,7 @@ def collate_dom_packing(
     dom_masks = []  # Valid pulse mask
     global_dom_ids = []  # Global DOM index for aggregation
     dom_to_event_idx = []
+    sensor_ids = []  # Track actual sensor IDs for T2
 
     current_seq = []
     current_boundaries = []
@@ -414,6 +415,7 @@ def collate_dom_packing(
 
         # Track DOM metadata
         dom_to_event_idx.append(event_idx)
+        sensor_ids.append(dom_id)
 
     # Finalize last sequence
     if len(current_seq) > 0:
@@ -455,7 +457,8 @@ def collate_dom_packing(
         'metadata': {
             'global_dom_ids': torch.stack(global_dom_ids, dim=0),  # (bsz, max_seq_len)
             'total_doms': total_doms,
-            'dom_to_event_idx': torch.tensor(dom_to_event_idx, dtype=torch.long),
+            'dom_to_event_idx': torch.tensor(dom_to_event_idx, dtype=torch.long),  # (total_doms,)
+            'sensor_ids': torch.tensor(sensor_ids, dtype=torch.long),  # (total_doms,) - actual sensor IDs
             'event_ids': torch.stack(event_ids) if event_ids else None,
             'targets': torch.stack(targets) if targets else None,
         }
