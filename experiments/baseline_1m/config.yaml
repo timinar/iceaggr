@@ -4,18 +4,18 @@
 model:
   # T1 (DOM-level transformer)
   d_model: 128
-  t1_n_heads: 8
+  t1_n_heads: 4
   t1_n_layers: 4
   t1_max_seq_len: 512
   t1_max_batch_size: 64
 
   # T2 (Event-level transformer)
-  t2_n_heads: 8
+  t2_n_heads: 4
   t2_n_layers: 4
   t2_max_doms: 2048
 
   # Other
-  dropout: 0.1
+  dropout: 0.0
 
 training:
   # Data
@@ -26,8 +26,8 @@ training:
 
   # Optimization
   num_epochs: 20
-  learning_rate: 3e-4
-  weight_decay: 1e-5
+  learning_rate: 0.0003  # 3e-4
+  weight_decay: 0.00001  # 1e-5
   grad_clip_norm: 1.0
   accumulation_steps: 1
 

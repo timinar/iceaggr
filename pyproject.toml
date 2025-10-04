@@ -13,6 +13,7 @@ dependencies = [
     "seaborn>=0.13.2",
     "torch>=2.8.0",
     "tqdm>=4.67.1",
+    "wandb>=0.22.1",
 ]
 
 [dependency-groups]
