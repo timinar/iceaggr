@@ -1,0 +1,19 @@
+# Data paths configuration template
+# Copy this file to data_config.yaml and update paths for your system:
+#   cp data_config.template.yaml data_config.yaml
+#
+# For experiment-specific configs (model architecture, training params, etc.),
+# create configs in the configs/ directory (to be created)
+
+data:
+  # Root directory containing IceCube Kaggle data
+  root: /path/to/icecube_kaggle
+
+  # Training data directory
+  train: /path/to/icecube_kaggle/train
+
+  # Test data directory
+  test: /path/to/icecube_kaggle/test
+
+  # Batch file pattern
+  batch_pattern: "batch_*.parquet"

@@ -20,7 +20,7 @@ def test_basic_functionality():
 
     # Load small subset for testing
     dataset = IceCubeDataset(
-        config_path="config.yaml", split="train", max_events=1000
+        config_path="data_config.yaml", split="train", max_events=1000
     )
 
     print(f"\nDataset size: {len(dataset)}")
@@ -51,7 +51,7 @@ def test_collate_function():
     print("=" * 70)
 
     dataloader = get_dataloader(
-        config_path="config.yaml",
+        config_path="data_config.yaml",
         split="train",
         batch_size=8,
         shuffle=False,
@@ -83,7 +83,7 @@ def benchmark_throughput(n_batches=100, batch_size=32):
     print("=" * 70)
 
     dataloader = get_dataloader(
-        config_path="config.yaml",
+        config_path="data_config.yaml",
         split="train",
         batch_size=batch_size,
         shuffle=False,
@@ -136,7 +136,7 @@ def test_variable_lengths():
 
     # Load larger subset to get diverse event sizes
     dataset = IceCubeDataset(
-        config_path="config.yaml", split="train", max_events=10000
+        config_path="data_config.yaml", split="train", max_events=10000
     )
 
     # Sample events and collect pulse counts

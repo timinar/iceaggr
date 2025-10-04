@@ -25,7 +25,7 @@ class IceCubeDataset(Dataset):
     Each event contains pulses with features: time, charge, sensor_id, auxiliary.
 
     Args:
-        config_path: Path to config.yaml with data paths
+        config_path: Path to data_config.yaml with data paths
         split: 'train' or 'test'
         max_events: Optional limit on number of events (for testing)
         cache_size: Number of batch files to keep in LRU cache (default: 1)
@@ -40,7 +40,7 @@ class IceCubeDataset(Dataset):
 
     def __init__(
         self,
-        config_path: str = "config.yaml",
+        config_path: str = "data_config.yaml",
         split: str = "train",
         max_events: Optional[int] = None,
         cache_size: int = 1,
@@ -196,7 +196,7 @@ def collate_variable_length(
 
 
 def get_dataloader(
-    config_path: str = "config.yaml",
+    config_path: str = "data_config.yaml",
     split: str = "train",
     batch_size: int = 32,
     shuffle: bool = True,
@@ -207,7 +207,7 @@ def get_dataloader(
     Create a DataLoader for IceCube events.
 
     Args:
-        config_path: Path to config.yaml
+        config_path: Path to data_config.yaml
         split: 'train' or 'test'
         batch_size: Number of events per batch
         shuffle: Whether to shuffle events

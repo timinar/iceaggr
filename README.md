@@ -91,21 +91,21 @@ Pulses → [DOM-level Transformer (T1)] → DOM embeddings → [Event-level Tran
 
 ```
 iceaggr/
-├── src/iceaggr/           # Main code (importable package)
-│   ├── config/           # Configuration utilities
-│   ├── data/             # Data loading code (DataLoaders, etc.)
-│   ├── models/           # Model architectures (T1, T2 transformers)
-│   ├── training/         # Training loops and utilities
-│   └── utils/            # Utilities (logging, metrics, etc.)
-├── configs/              # Experiment configurations
-│   ├── experiment/       # Full experiment configs
-│   └── model/            # Model-specific configs
-├── notebooks/            # Jupyter notebooks for exploration
-├── scripts/              # Standalone scripts (analysis, training)
-├── tests/                # Unit and integration tests
-├── config.yaml           # Local data paths (gitignored)
-├── config.template.yaml  # Template for data paths
-└── pyproject.toml        # Project dependencies and settings
+├── src/iceaggr/              # Main code (importable package)
+│   ├── config/              # Configuration utilities
+│   ├── data/                # Data loading code (DataLoaders, etc.)
+│   ├── models/              # Model architectures (T1, T2 transformers)
+│   ├── training/            # Training loops and utilities
+│   └── utils/               # Utilities (logging, metrics, etc.)
+├── configs/                 # Experiment configurations
+│   ├── experiment/          # Full experiment configs
+│   └── model/               # Model-specific configs
+├── notebooks/               # Jupyter notebooks for exploration
+├── scripts/                 # Standalone scripts (analysis, training)
+├── tests/                   # Unit and integration tests
+├── data_config.yaml         # Local data paths (gitignored)
+├── data_config.template.yaml # Template for data paths
+└── pyproject.toml           # Project dependencies and settings
 ```
 
 **Note**: Core package structure (`src/`, `tests/`, `notebooks/`, `configs/`) will be created as development progresses.
@@ -113,7 +113,7 @@ iceaggr/
 ## 🧪 Current Progress
 
 - [x] Data exploration and statistics (see [scripts/2029_09_08_pulse_statistics.py](scripts/2029_09_08_pulse_statistics.py))
-- [ ] Dataloader implementation with DOM grouping
+- [x] Dataloader implementation with continuous batching (see [src/iceaggr/data/](src/iceaggr/data/))
 - [ ] DOM-level transformer (T1) with FlexAttention
 - [ ] Event-level transformer (T2)
 - [ ] End-to-end training pipeline

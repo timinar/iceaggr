@@ -9,8 +9,12 @@ import time
 import numpy as np
 from pathlib import Path
 import json
+import yaml
 
-DATA_DIR = Path("/groups/pheno/inar/icecube_kaggle")
+# Load data paths from config
+with open("data_config.yaml") as f:
+    config = yaml.safe_load(f)
+DATA_DIR = Path(config["data"]["root"])
 
 def benchmark_single_batch_load(batch_id=1):
     """Benchmark loading a single batch file."""

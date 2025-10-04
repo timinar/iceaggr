@@ -69,50 +69,58 @@ uv run mypy src/                 # Type checking
 
 ```
 iceaggr/
-├── src/iceaggr/           # Main code (importable package)
-│   ├── config/           # Configuration utilities
-│   ├── data/             # DataLoaders with DOM grouping
-│   ├── models/           # T1 and T2 transformer architectures
-│   ├── training/         # Training loops and utilities
-│   └── utils/            # Logging, metrics, etc.
-├── configs/              # Experiment configurations
-│   ├── experiment/       # Full experiment configs
-│   └── model/            # Model-specific configs
-├── scripts/              # Standalone analysis/training scripts
-├── notebooks/            # Jupyter notebooks for experiments
-├── tests/                # Unit and integration tests
-├── config.yaml           # Local data paths (gitignored)
-├── config.template.yaml  # Template for data paths
-└── pyproject.toml        # Dependencies and project config
+├── src/iceaggr/              # Main code (importable package)
+│   ├── config/              # Configuration utilities (to be created)
+│   ├── data/                # DataLoaders with DOM grouping ✓
+│   ├── models/              # T1 and T2 transformer architectures (to be created)
+│   ├── training/            # Training loops and utilities (to be created)
+│   └── utils/               # Logging, metrics, etc. (to be created)
+├── configs/                 # Experiment configurations (to be created)
+│   ├── experiment/          # Full experiment configs
+│   └── model/               # Model-specific configs
+├── scripts/                 # Standalone analysis/training scripts ✓
+├── notebooks/               # Jupyter notebooks for experiments (to be created)
+├── tests/                   # Unit and integration tests (to be created)
+├── data_config.yaml         # Local data paths (gitignored) ✓
+├── data_config.template.yaml # Template for data paths ✓
+└── pyproject.toml           # Dependencies and project config ✓
 ```
 
-**Current state**: Early development - only scripts and config templates exist. Core package structure needs to be built.
+**Current state**: Data loading complete (✓). Next: Model implementation.
 
 ## Configuration Management
 
 The project uses a simple two-tier config approach:
 
-1. **Data paths** (`config.yaml` in root):
+1. **Data paths** (`data_config.yaml` in root):
    - Gitignored, local to each user
-   - Contains only data paths (train, test directories)
-   - Copy from `config.template.yaml` and modify
+   - Contains **only data paths** (train, test directories)
+   - Copy from `data_config.template.yaml` and modify
+   - Example:
+     ```yaml
+     data:
+       root: /path/to/icecube_kaggle
+       train: /path/to/icecube_kaggle/train
+       test: /path/to/icecube_kaggle/test
+       batch_pattern: "batch_*.parquet"
+     ```
 
-2. **Experiment configs** (`configs/` directory):
+2. **Experiment configs** (`configs/` directory - to be created):
    - Committed to git
-   - Model architectures, training params, etc.
+   - Model architectures, training params, logging settings
    - Organized by experiment type
 
-Load configs in code:
+Load data config in code:
 ```python
 import yaml
 
-def load_config(config_path="config.yaml"):
-    with open(config_path) as f:
-        return yaml.safe_load(f)
+with open("data_config.yaml") as f:
+    config = yaml.safe_load(f)
 
-config = load_config()
 train_path = config["data"]["train"]
 ```
+
+**Important**: All scripts should use `data_config.yaml` for data paths, not hardcoded paths!
 
 ## Data Architecture
 
