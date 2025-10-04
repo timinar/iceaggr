@@ -77,15 +77,13 @@ class EventTransformer(nn.Module):
 
         # Prediction head: aggregated embedding → (azimuth, zenith)
         # Prediction head: outputs (azimuth, zenith)
-        # Azimuth: [0, 2π], Zenith: [0, π]
+        # Using unbounded outputs - let loss function handle the geometry
         self.prediction_head = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model, 2),
+            nn.Linear(d_model, 2),  # Raw outputs (azimuth, zenith)
         )
-        # Use sigmoid to constrain outputs then scale to angle ranges
-        self.angle_activation = nn.Sigmoid()  # outputs [0, 1]
 
         logger.info(
             f"Initialized EventTransformer: d_model={d_model}, n_heads={n_heads}, "
@@ -184,15 +182,8 @@ class EventTransformer(nn.Module):
         valid_doms = mask.sum(dim=1).clamp(min=1)  # (batch_size, 1)
         event_embedding = event_embedding / valid_doms  # Mean pooling
 
-        # Predict direction with constrained outputs
-        logits = self.prediction_head(event_embedding)  # (batch_size, 2)
-        normalized = self.angle_activation(logits)  # (batch_size, 2) in [0, 1]
-
-        # Scale to angle ranges: azimuth [0, 2π], zenith [0, π]
-        azimuth = normalized[:, 0:1] * (2 * 3.14159265359)
-        zenith = normalized[:, 1:2] * 3.14159265359
-        predictions = torch.cat([azimuth, zenith], dim=1)  # (batch_size, 2)
-
+        # Predict direction (unbounded - angular distance loss handles periodicity)
+        predictions = self.prediction_head(event_embedding)  # (batch_size, 2)
         return predictions
 
     def _pack_events(
