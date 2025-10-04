@@ -69,19 +69,50 @@ uv run mypy src/                 # Type checking
 
 ```
 iceaggr/
-├── src/iceaggr/         # Main package (NOT YET CREATED - will contain):
-│   ├── config/          # YAML feature configurations
-│   ├── data/            # DataLoaders with DOM grouping
-│   ├── models/          # T1 and T2 transformer architectures
-│   ├── training/        # Training loops and utilities
-│   └── utils/           # Logging, metrics, etc.
-├── scripts/             # Standalone analysis/training scripts
-├── notebooks/           # Jupyter notebooks for experiments (NOT YET CREATED)
-├── tests/              # Unit and integration tests (NOT YET CREATED)
-└── pyproject.toml      # Dependencies and project config
+├── src/iceaggr/           # Main code (importable package)
+│   ├── config/           # Configuration utilities
+│   ├── data/             # DataLoaders with DOM grouping
+│   ├── models/           # T1 and T2 transformer architectures
+│   ├── training/         # Training loops and utilities
+│   └── utils/            # Logging, metrics, etc.
+├── configs/              # Experiment configurations
+│   ├── experiment/       # Full experiment configs
+│   └── model/            # Model-specific configs
+├── scripts/              # Standalone analysis/training scripts
+├── notebooks/            # Jupyter notebooks for experiments
+├── tests/                # Unit and integration tests
+├── config.yaml           # Local data paths (gitignored)
+├── config.template.yaml  # Template for data paths
+└── pyproject.toml        # Dependencies and project config
 ```
 
-**Current state**: Early development - only scripts exist. Core package structure needs to be built.
+**Current state**: Early development - only scripts and config templates exist. Core package structure needs to be built.
+
+## Configuration Management
+
+The project uses a simple two-tier config approach:
+
+1. **Data paths** (`config.yaml` in root):
+   - Gitignored, local to each user
+   - Contains only data paths (train, test directories)
+   - Copy from `config.template.yaml` and modify
+
+2. **Experiment configs** (`configs/` directory):
+   - Committed to git
+   - Model architectures, training params, etc.
+   - Organized by experiment type
+
+Load configs in code:
+```python
+import yaml
+
+def load_config(config_path="config.yaml"):
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
+config = load_config()
+train_path = config["data"]["train"]
+```
 
 ## Data Architecture
 

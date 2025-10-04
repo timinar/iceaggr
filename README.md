@@ -7,13 +7,11 @@ A research project developing transformer models for precise angular reconstruct
 > **New to the project?** See setup instructions for [installing UV](#install-uv) and [downloading IceCube data](#download-icecube-kaggle-data) at the end of this README.
 
 ## 🚀 Quick Start
-We use `uv` throughout the project for dependency management and running code (see [installing UV](#install-uv)).
+We use `uv` (the modern Python package manager) throughout the project for dependency management and running code (see [installing UV](#install-uv)).
 ```bash
 # Sync dependencies (run after pulling changes)
 uv sync
 
-# Start exploring
-uv run jupyter lab
 
 # Run analysis scripts
 uv run python scripts/2029_09_08_pulse_statistics.py
@@ -38,7 +36,7 @@ uv run ruff check .              # Check for issues
 uv run mypy src/                 # Type checking
 
 # Dependencies
-uv add package-name              # Add new package
+uv add package-name              # Add new package. Updates pyproject.toml
 uv add --dev dev-tool            # Add dev dependency
 uv sync                          # Install/update all dependencies
 ```
@@ -89,6 +87,29 @@ Pulses → [DOM-level Transformer (T1)] → DOM embeddings → [Event-level Tran
    - Efficient batching for variable-length sequences
    - Potential caching of DOM embeddings
 
+## 📁 Project Structure
+
+```
+iceaggr/
+├── src/iceaggr/           # Main code (importable package)
+│   ├── config/           # Configuration utilities
+│   ├── data/             # Data loading code (DataLoaders, etc.)
+│   ├── models/           # Model architectures (T1, T2 transformers)
+│   ├── training/         # Training loops and utilities
+│   └── utils/            # Utilities (logging, metrics, etc.)
+├── configs/              # Experiment configurations
+│   ├── experiment/       # Full experiment configs
+│   └── model/            # Model-specific configs
+├── notebooks/            # Jupyter notebooks for exploration
+├── scripts/              # Standalone scripts (analysis, training)
+├── tests/                # Unit and integration tests
+├── config.yaml           # Local data paths (gitignored)
+├── config.template.yaml  # Template for data paths
+└── pyproject.toml        # Project dependencies and settings
+```
+
+**Note**: Core package structure (`src/`, `tests/`, `notebooks/`, `configs/`) will be created as development progresses.
+
 ## 🧪 Current Progress
 
 - [x] Data exploration and statistics (see [scripts/2029_09_08_pulse_statistics.py](scripts/2029_09_08_pulse_statistics.py))
@@ -97,8 +118,6 @@ Pulses → [DOM-level Transformer (T1)] → DOM embeddings → [Event-level Tran
 - [ ] Event-level transformer (T2)
 - [ ] End-to-end training pipeline
 - [ ] Comparison with spline-mpe baseline
-
-
 
 ## 🤝 Contributing
 
