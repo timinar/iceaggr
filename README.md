@@ -114,6 +114,7 @@ iceaggr/
 
 - [x] Data exploration and statistics (see [scripts/2029_09_08_pulse_statistics.py](scripts/2029_09_08_pulse_statistics.py))
 - [x] Dataloader implementation with continuous batching (see [src/iceaggr/data/](src/iceaggr/data/))
+- [x] Logging utility with color-coded output (see [src/iceaggr/utils/](src/iceaggr/utils/))
 - [ ] DOM-level transformer (T1) with FlexAttention
 - [ ] Event-level transformer (T2)
 - [ ] End-to-end training pipeline

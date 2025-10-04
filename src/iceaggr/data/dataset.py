@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, List
 import yaml
 
+from iceaggr.utils import get_logger
+
+logger = get_logger(__name__)
+
 
 class IceCubeDataset(Dataset):
     """
@@ -59,14 +63,14 @@ class IceCubeDataset(Dataset):
 
         # Load metadata
         meta_path = self.data_root / f"{split}_meta.parquet"
-        print(f"Loading metadata from {meta_path}...")
+        logger.info(f"Loading metadata from {meta_path}...")
         self.metadata = pq.read_table(meta_path)
 
         if max_events is not None:
             self.metadata = self.metadata.slice(0, max_events)
 
         self.n_events = len(self.metadata)
-        print(f"Loaded {self.n_events:,} events from {split} split")
+        logger.info(f"Loaded {self.n_events:,} events from {split} split")
 
         # Extract metadata columns as numpy arrays for fast access
         self.batch_ids = self.metadata.column("batch_id").to_numpy()
