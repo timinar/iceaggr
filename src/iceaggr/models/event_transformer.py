@@ -75,14 +75,13 @@ class EventTransformer(nn.Module):
             num_layers=n_layers,
         )
 
-        # Prediction head: aggregated embedding → (azimuth, zenith)
-        # Prediction head: outputs (azimuth, zenith)
-        # Using unbounded outputs - let loss function handle the geometry
+        # Prediction head: aggregated embedding → unit vector (x, y, z)
+        # Predicting 3D unit vector is more stable than angles
         self.prediction_head = nn.Sequential(
             nn.Linear(d_model, d_model),
-            nn.GELU(),
+            nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model, 2),  # Raw outputs (azimuth, zenith)
+            nn.Linear(d_model, 3),  # Outputs (x, y, z) before normalization
         )
 
         logger.info(
@@ -182,8 +181,17 @@ class EventTransformer(nn.Module):
         valid_doms = mask.sum(dim=1).clamp(min=1)  # (batch_size, 1)
         event_embedding = event_embedding / valid_doms  # Mean pooling
 
-        # Predict direction (unbounded - angular distance loss handles periodicity)
-        predictions = self.prediction_head(event_embedding)  # (batch_size, 2)
+        # Predict direction as unit vector
+        vector = self.prediction_head(event_embedding)  # (batch_size, 3)
+
+        # Normalize to unit sphere
+        norm = torch.sqrt(torch.sum(vector**2, dim=1, keepdim=True))
+        unit_vector = vector / (norm + 1e-8)  # (batch_size, 3)
+
+        # Convert to angles (azimuth, zenith) for compatibility with loss
+        from iceaggr.training import unit_vector_to_angles
+        predictions = unit_vector_to_angles(unit_vector)  # (batch_size, 2)
+
         return predictions
 
     def _pack_events(
