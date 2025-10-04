@@ -213,7 +213,5 @@ checkpoints/
 *.png
 *.pdf
 
-# Notes and experiments (keep local, except design docs)
-notes/
-!notes/03_dom_aggregation_architecture.md
-!notes/04_flex_attention_benchmark_results.md
+# Personal notes and experiments (keep local)
+personal_notes/
