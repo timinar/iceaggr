@@ -54,6 +54,14 @@ class DOMTransformer(nn.Module):
         self.d_ff = d_ff or 4 * d_model
         self.max_seq_len = max_seq_len
 
+        # Input normalization - CRITICAL for stable training!
+        # Using normalization from reference implementation:
+        # time: (time - 1e4) / 3e4
+        # charge: log10(charge) / 3.0
+        # sensor_id: pass through (not normalized in reference)
+        # auxiliary: pass through (binary feature)
+        # NOTE: We'll normalize in forward() to handle log10(charge)
+
         # Input projection
         self.input_projection = nn.Linear(pulse_features, d_model)
 
@@ -110,8 +118,34 @@ class DOMTransformer(nn.Module):
             return self._forward_chunked(batch, max_batch_size)
 
         # Normal forward pass for manageable batches
-        # Project pulse features to model dimension
-        x = self.input_projection(packed_sequences)  # (bsz, max_seq_len, d_model)
+        # Normalize pulse features (CRITICAL for stable training!)
+        # packed_sequences: (bsz, max_seq_len, 4) where 4 = [time, charge, sensor_id, auxiliary]
+        time = packed_sequences[..., 0]
+        charge = packed_sequences[..., 1]
+        sensor_id = packed_sequences[..., 2]
+        auxiliary = packed_sequences[..., 3]
+
+        # Normalize time: (time - 1e4) / 3e4
+        time_normalized = (time - 1e4) / 3e4
+
+        # Normalize charge: log10(charge) / 3.0
+        # Add small epsilon to avoid log(0)
+        charge_normalized = torch.log10(charge + 1e-8) / 3.0
+
+        # Normalize sensor_id: 0-5159 → [0, 1]
+        sensor_id_normalized = sensor_id / 5160.0
+
+        # auxiliary: pass through (binary 0/1, already normalized)
+        # Stack normalized features
+        normalized_features = torch.stack([
+            time_normalized,
+            charge_normalized,
+            sensor_id_normalized,  # Now normalized!
+            auxiliary
+        ], dim=-1)  # (bsz, max_seq_len, 4)
+
+        # Project normalized features to model dimension
+        x = self.input_projection(normalized_features)  # (bsz, max_seq_len, d_model)
 
         # Create DOM boundary mask function for FlexAttention
         # Pulses attend only to other pulses in the same DOM

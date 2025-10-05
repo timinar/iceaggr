@@ -151,8 +151,11 @@ class EventTransformer(nn.Module):
             self.sensor_geometry = self.sensor_geometry.to(device)
         dom_geometry = self.sensor_geometry[dom_ids]  # (total_doms, 3)
 
+        # Normalize geometry coordinates by 500 (from reference implementation)
+        dom_geometry_normalized = dom_geometry / 500.0
+
         # Encode geometry as positional information
-        geo_encoding = self.geometry_encoder(dom_geometry)  # (total_doms, d_model)
+        geo_encoding = self.geometry_encoder(dom_geometry_normalized)  # (total_doms, d_model)
 
         # Add geometry encoding to DOM embeddings
         dom_features = dom_embeddings + geo_encoding  # (total_doms, d_model)

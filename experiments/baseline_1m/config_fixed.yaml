@@ -1,0 +1,57 @@
+# Baseline E2E Hierarchical Transformer - 1M events (FIXED)
+# Experiment: baseline_1m_fixed
+#
+# FIXES APPLIED:
+# 1. ✅ Input normalization: time, charge, geometry (CRITICAL - prevents NaN!)
+# 2. ✅ Added dropout: 0.0 → 0.1 (regularization)
+# 3. ✅ LR: Keep at 3e-4 (works great with normalization)
+
+model:
+  # T1 (DOM-level transformer)
+  d_model: 128
+  t1_n_heads: 4
+  t1_n_layers: 4
+  t1_max_seq_len: 512
+  t1_max_batch_size: 64
+
+  # T2 (Event-level transformer)
+  t2_n_heads: 4
+  t2_n_layers: 4
+  t2_max_doms: 2048
+
+  # Other
+  dropout: 0.1  # CHANGED from 0.0
+
+training:
+  # Data
+  max_events: 1000000  # 1M events
+  batch_size: 256
+  val_split: 0.1
+  num_workers: 0
+
+  # Optimization
+  num_epochs: 20
+  learning_rate: 0.0003  # KEEP at 3e-4 - normalization fixed the instability!
+  weight_decay: 0.00001  # 1e-5
+  grad_clip_norm: 1.0
+  accumulation_steps: 1
+
+  # Checkpointing
+  checkpoint_dir: experiments/baseline_1m/checkpoints_fixed
+  save_every_n_epochs: 1
+
+  # Logging
+  log_dir: logs/baseline_1m_fixed
+  log_every_n_steps: 50
+  validate_every_n_epochs: 1
+
+  # W&B
+  use_wandb: true
+  wandb_project: iceaggr
+  wandb_run_name: baseline-1m-e2e-fixed
+  wandb_tags:
+    - baseline
+    - 1m-events
+    - e2e
+    - hierarchical-transformer
+    - fixed-lr
