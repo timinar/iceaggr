@@ -1,0 +1,48 @@
+# T2 First Pulse - Verbose Monitoring
+# Experiment: t2_verbose
+#
+# PURPOSE: Train T2-first-pulse with extensive metrics logging
+# Track: GPU utilization, timing, gradients, memory usage
+# No checkpointing to avoid clutter during experimentation
+
+model:
+  model_type: t2_first_pulse
+  d_model: 128
+  n_heads: 4
+  n_layers: 4
+  max_doms: 2048
+  dropout: 0.0
+
+training:
+  # Data - use moderate size for quick iteration
+  max_events: 10000  # 10K events for quick training
+  batch_size: 128  # Moderate batch size
+  val_split: 0.1
+  num_workers: 0
+
+  # Optimization
+  num_epochs: 10
+  learning_rate: 0.0003  # 3e-4
+  weight_decay: 0.00001  # 1e-5
+  grad_clip_norm: 1.0
+  accumulation_steps: 1
+
+  # Checkpointing - DISABLED for experimentation
+  checkpoint_dir: experiments/baseline_1m/checkpoints_t2_verbose
+  save_every_n_epochs: 999999  # Never save (set to huge number)
+
+  # Logging - VERBOSE!
+  log_dir: logs/t2_verbose
+  log_every_n_steps: 1  # Log EVERY step for detailed monitoring
+  validate_every_n_epochs: 1
+
+  # W&B - with all the metrics!
+  use_wandb: true
+  wandb_project: iceaggr
+  wandb_run_name: t2-verbose-monitoring
+  wandb_tags:
+    - diagnostic
+    - t2-only
+    - first-pulse
+    - verbose-metrics
+    - 10k-events

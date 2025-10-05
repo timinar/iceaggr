@@ -116,11 +116,16 @@ class E2ETrainer:
         self.optimizer.zero_grad()
 
         for step, batch in enumerate(train_loader):
+            step_start = time.time()
+
             # Move batch to device (batch is already collated with dom packing)
             batch = self._batch_to_device(batch)
+            data_load_time = time.time() - step_start
 
             # Forward pass: T1 → T2 → predictions
-            predictions = self.model(batch)  # (batch_size, 2)
+            forward_start = time.time()
+            predictions = self.model(batch)  # (batch_size, 2) or (batch_size, 3) for unit vectors
+            forward_time = time.time() - forward_start
 
             # Get targets from metadata
             targets = batch["metadata"]["targets"]  # (batch_size, 2)
@@ -132,12 +137,17 @@ class E2ETrainer:
             loss = loss / self.config.accumulation_steps
 
             # Backward pass
+            backward_start = time.time()
             loss.backward()
+            backward_time = time.time() - backward_start
 
             # Optimizer step every accumulation_steps
             if (step + 1) % self.config.accumulation_steps == 0 or (step + 1) == len(
                 train_loader
             ):
+                # Compute gradient norm BEFORE clipping
+                grad_norm = self._compute_grad_norm()
+
                 # Gradient clipping
                 if self.config.grad_clip_norm is not None:
                     torch.nn.utils.clip_grad_norm_(
@@ -145,29 +155,61 @@ class E2ETrainer:
                     )
 
                 # Optimizer step
+                optim_start = time.time()
                 self.optimizer.step()
                 self.optimizer.zero_grad()
+                optim_time = time.time() - optim_start
 
                 self.global_step += 1
+
+                # Get GPU memory stats
+                if torch.cuda.is_available():
+                    gpu_mem_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                    gpu_mem_reserved = torch.cuda.memory_reserved() / 1024**3  # GB
+                else:
+                    gpu_mem_allocated = 0
+                    gpu_mem_reserved = 0
 
                 # Logging
                 if self.global_step % self.config.log_every_n_steps == 0:
                     batch_size = len(batch["metadata"]["event_ids"])
+                    total_step_time = time.time() - step_start
+
                     logger.info(
                         f"Epoch {self.current_epoch} | Step {self.global_step} | "
                         f"Loss: {loss.item() * self.config.accumulation_steps:.4f} | "
-                        f"Batch size: {batch_size}"
+                        f"Batch size: {batch_size} | "
+                        f"GPU: {gpu_mem_allocated:.2f}GB | "
+                        f"GradNorm: {grad_norm:.4f}"
                     )
 
                     if self.wandb_run is not None:
-                        self.wandb_run.log(
-                            {
-                                "train/loss": loss.item()
-                                * self.config.accumulation_steps,
-                                "train/step": self.global_step,
-                                "train/epoch": self.current_epoch,
-                            }
-                        )
+                        wandb_metrics = {
+                            "train/loss": loss.item() * self.config.accumulation_steps,
+                            "train/step": self.global_step,
+                            "train/epoch": self.current_epoch,
+                            "train/batch_size": batch_size,
+                            # Timing metrics
+                            "timing/data_load_sec": data_load_time,
+                            "timing/forward_sec": forward_time,
+                            "timing/backward_sec": backward_time,
+                            "timing/optimizer_sec": optim_time,
+                            "timing/total_step_sec": total_step_time,
+                            # Gradient metrics
+                            "gradients/norm": grad_norm,
+                            "gradients/clipped": grad_norm > self.config.grad_clip_norm if self.config.grad_clip_norm else False,
+                            # GPU metrics
+                            "gpu/memory_allocated_gb": gpu_mem_allocated,
+                            "gpu/memory_reserved_gb": gpu_mem_reserved,
+                            # Learning rate
+                            "train/learning_rate": self.optimizer.param_groups[0]['lr'],
+                        }
+
+                        # Add model-specific metrics if available
+                        if hasattr(batch['metadata'], 'total_doms'):
+                            wandb_metrics["data/total_doms"] = batch['metadata']['total_doms']
+
+                        self.wandb_run.log(wandb_metrics)
 
             epoch_loss += loss.item() * self.config.accumulation_steps
             num_batches += 1
@@ -327,3 +369,13 @@ class E2ETrainer:
                 device_batch[key] = value
 
         return device_batch
+
+    def _compute_grad_norm(self) -> float:
+        """Compute L2 norm of gradients across all parameters."""
+        total_norm = 0.0
+        for p in self.model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** 0.5
+        return total_norm
