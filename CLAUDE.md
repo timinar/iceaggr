@@ -78,13 +78,13 @@ iceaggr/
 │   └── baseline_1m/         # 1M events baseline (config, checkpoints)
 ├── scripts/                 # Standalone scripts
 │   ├── train_from_config.py # Main training script
+│   ├── start_training.sh    # Training launcher
 │   ├── archive/             # Benchmark & analysis scripts
 │   └── debug/               # One-time debugging scripts
 ├── notes/                   # Architecture documentation
 ├── personal_notes/          # Session notes (gitignored)
 ├── notebooks/               # Jupyter exploration
-├── tests/                   # Unit & integration tests
-└── START_TRAINING.sh        # Quick training launcher
+└── tests/                   # Unit & integration tests
 ```
 
 **Current state**: ✅ E2E pipeline complete! T1, T2, data loading, training all working.
@@ -128,7 +128,7 @@ train_path = config["data"]["train"]
 ### Start Training
 
 ```bash
-./START_TRAINING.sh
+./scripts/start_training.sh
 ```
 
 This runs training in a screen session with logging.

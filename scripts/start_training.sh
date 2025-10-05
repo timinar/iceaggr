@@ -1,7 +1,8 @@
 #!/bin/bash
 # Start training in screen with logging
 #
-# Usage: ./START_TRAINING.sh
+# Usage (from repo root):
+#   ./scripts/start_training.sh
 #
 # This will:
 # - Create a screen session named "training"
@@ -18,6 +19,9 @@
 #   exit                        # Exit screen
 
 set -e  # Exit on error
+
+# Make sure we're running from repo root
+cd "$(dirname "$0")/.."
 
 # Configuration
 SESSION_NAME="training"

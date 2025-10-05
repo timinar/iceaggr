@@ -100,12 +100,12 @@ iceaggr/
 │   └── baseline_1m/         # 1M events baseline experiment
 ├── scripts/                 # Standalone scripts
 │   ├── train_from_config.py # Main training script
+│   ├── start_training.sh    # Training launcher
 │   ├── archive/             # Benchmark & analysis scripts
 │   └── debug/               # One-time debugging scripts
 ├── notes/                   # Architecture documentation
 ├── notebooks/               # Jupyter exploration
-├── tests/                   # Unit & integration tests
-└── START_TRAINING.sh        # Quick training launcher
+└── tests/                   # Unit & integration tests
 ```
 
 **Note**: `data_config.yaml` lives in `src/iceaggr/data/` (gitignored, copy from template)
@@ -125,7 +125,7 @@ iceaggr/
 Start training with one command:
 
 ```bash
-./START_TRAINING.sh
+./scripts/start_training.sh
 ```
 
 This will:
