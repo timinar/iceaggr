@@ -60,16 +60,10 @@ class T2FirstPulseModel(nn.Module):
         # Load sensor geometry
         self.sensor_geometry = self._load_geometry(geometry_path)
 
-        # Project first pulse features to d_model
-        # Input: [time, charge, sensor_id, auxiliary] (normalized)
-        self.pulse_projection = nn.Linear(pulse_features, d_model)
-
-        # Geometry encoder: (x,y,z) → d_model
-        self.geometry_encoder = nn.Sequential(
-            nn.Linear(3, d_model // 2),
-            nn.GELU(),
-            nn.Linear(d_model // 2, d_model),
-        )
+        # Project combined features to d_model
+        # Input: [time, charge, auxiliary, x, y, z] (6 features)
+        # Note: sensor_id is NOT normalized - replaced with actual geometry!
+        self.pulse_projection = nn.Linear(6, d_model)
 
         # Transformer layers (same as T2)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -149,36 +143,21 @@ class T2FirstPulseModel(nn.Module):
 
         device = packed_sequences.device
 
-        # Extract first pulse per DOM
-        dom_features, dom_ids = self._extract_first_pulses(
+        # Extract first pulse per DOM (now returns 6 features: time, charge, aux, x, y, z)
+        dom_features_combined = self._extract_first_pulses(
             packed_sequences, dom_boundaries, dom_mask, metadata
         )
-        # dom_features: (total_doms, 4) - first pulse features (normalized)
-        # dom_ids: (total_doms,) - sensor IDs
+        # dom_features_combined: (total_doms, 6) - [time, charge, auxiliary, x, y, z] all normalized
 
-        # Project pulse features to d_model
-        dom_embeddings = self.pulse_projection(dom_features)  # (total_doms, d_model)
-
-        # Get geometry for each DOM
-        if self.sensor_geometry.device != device:
-            self.sensor_geometry = self.sensor_geometry.to(device)
-        dom_geometry = self.sensor_geometry[dom_ids]  # (total_doms, 3)
-
-        # Normalize geometry coordinates by 500
-        dom_geometry_normalized = dom_geometry / 500.0
-
-        # Encode geometry as positional information
-        geo_encoding = self.geometry_encoder(dom_geometry_normalized)  # (total_doms, d_model)
-
-        # Add geometry encoding to DOM embeddings
-        dom_features_combined = dom_embeddings + geo_encoding  # (total_doms, d_model)
+        # Project combined features to d_model
+        dom_embeddings = self.pulse_projection(dom_features_combined)  # (total_doms, d_model)
 
         # Pack DOMs into batched sequences (one event per sequence)
         dom_to_event_idx = metadata['dom_to_event_idx']
         batch_size = metadata['event_ids'].shape[0]
 
         event_sequences, padding_mask = self._pack_events(
-            dom_features_combined, dom_to_event_idx, batch_size
+            dom_embeddings, dom_to_event_idx, batch_size
         )
 
         # Apply transformer
@@ -210,9 +189,9 @@ class T2FirstPulseModel(nn.Module):
         dom_boundaries: torch.Tensor,
         dom_mask: torch.Tensor,
         metadata: Dict[str, torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
-        Extract first pulse features from each DOM.
+        Extract first pulse features from each DOM, combined with geometry.
 
         Args:
             packed_sequences: (bsz, max_seq_len, 4) - packed pulse features
@@ -221,8 +200,7 @@ class T2FirstPulseModel(nn.Module):
             metadata: Dict containing 'total_doms', 'global_dom_ids', 'sensor_ids'
 
         Returns:
-            first_pulse_features: (total_doms, 4) - normalized first pulse features
-            sensor_ids: (total_doms,) - sensor ID for each DOM
+            combined_features: (total_doms, 6) - [time, charge, auxiliary, x, y, z] normalized
         """
         bsz, seq_len, _ = packed_sequences.shape
         total_doms = metadata['total_doms']
@@ -233,32 +211,30 @@ class T2FirstPulseModel(nn.Module):
         # Normalize pulse features (CRITICAL for stable training!)
         time = packed_sequences[..., 0]
         charge = packed_sequences[..., 1]
-        sensor_id = packed_sequences[..., 2]
+        # Note: sensor_id (feature 2) is NOT used - we use geometry instead!
         auxiliary = packed_sequences[..., 3]
 
         time_normalized = (time - 1e4) / 3e4
         charge_normalized = torch.log10(charge + 1e-8) / 3.0
-        sensor_id_normalized = sensor_id / 5160.0
 
         normalized_sequences = torch.stack([
             time_normalized,
             charge_normalized,
-            sensor_id_normalized,
             auxiliary
-        ], dim=-1)  # (bsz, max_seq_len, 4)
+        ], dim=-1)  # (bsz, max_seq_len, 3)
 
         # Initialize first pulse features for each DOM
-        first_pulses = torch.zeros(total_doms, 4, device=device, dtype=normalized_sequences.dtype)
+        first_pulses = torch.zeros(total_doms, 3, device=device, dtype=normalized_sequences.dtype)
         dom_found = torch.zeros(total_doms, device=device, dtype=torch.bool)
 
         # Flatten for easier processing
-        normalized_flat = normalized_sequences.view(-1, 4)  # (bsz * seq_len, 4)
+        normalized_flat = normalized_sequences.view(-1, 3)  # (bsz * seq_len, 3)
         global_dom_ids_flat = global_dom_ids.view(-1)  # (bsz * seq_len,)
         dom_mask_flat = dom_mask.view(-1)  # (bsz * seq_len,)
 
         # For each valid pulse, check if it's the first for its DOM
         valid_mask = dom_mask_flat.bool()
-        valid_features = normalized_flat[valid_mask]  # (n_valid_pulses, 4)
+        valid_features = normalized_flat[valid_mask]  # (n_valid_pulses, 3)
         valid_dom_ids = global_dom_ids_flat[valid_mask]  # (n_valid_pulses,)
 
         # Process pulses in order (first occurrence = first pulse)
@@ -268,7 +244,16 @@ class T2FirstPulseModel(nn.Module):
                 first_pulses[dom_id] = valid_features[pulse_idx]
                 dom_found[dom_id] = True
 
-        return first_pulses, sensor_ids
+        # Get geometry for each DOM
+        if self.sensor_geometry.device != device:
+            self.sensor_geometry = self.sensor_geometry.to(device)
+        dom_geometry = self.sensor_geometry[sensor_ids]  # (total_doms, 3)
+        dom_geometry_normalized = dom_geometry / 500.0  # Normalize by detector scale
+
+        # Combine: [time, charge, auxiliary, x, y, z]
+        combined_features = torch.cat([first_pulses, dom_geometry_normalized], dim=1)  # (total_doms, 6)
+
+        return combined_features
 
     def _pack_events(
         self,
