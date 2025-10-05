@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 
 from iceaggr.data import IceCubeDataset, collate_dom_packing
 from iceaggr.models import HierarchicalTransformer
+from iceaggr.models.t2_first_pulse import T2FirstPulseModel
 from iceaggr.training import AngularDistanceLoss, E2ETrainer, TrainingConfig
 from iceaggr.utils import get_logger
 
@@ -39,6 +40,7 @@ def load_config(config_path: str) -> dict:
 def create_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
     """Create train and validation dataloaders from config."""
     train_cfg = config["training"]
+    model_cfg = config["model"]
 
     # Create full dataset
     full_dataset = IceCubeDataset(
@@ -69,6 +71,10 @@ def create_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
 
     logger.info(f"Dataset split: {len(train_dataset)} train, {len(val_dataset)} val")
 
+    # Determine max_seq_len for collate function
+    # For t2_first_pulse model, we still need DOM packing (same collate function)
+    max_seq_len = model_cfg.get("t1_max_seq_len", 512)
+
     # Create dataloaders
     # NOTE: shuffle=False because RandomSampler is extremely slow with 900K events (11 sec/batch!)
     # Data is already somewhat shuffled across batches since events span multiple parquet files
@@ -79,7 +85,7 @@ def create_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
         shuffle=False,  # Disabled due to performance (see shuffle_debug.log)
         num_workers=train_cfg.get("num_workers", 4),
         collate_fn=lambda batch: collate_dom_packing(
-            batch, max_seq_len=config["model"]["t1_max_seq_len"]
+            batch, max_seq_len=max_seq_len
         ),
         pin_memory=True,
     )
@@ -90,7 +96,7 @@ def create_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
         shuffle=False,
         num_workers=train_cfg.get("num_workers", 4),
         collate_fn=lambda batch: collate_dom_packing(
-            batch, max_seq_len=config["model"]["t1_max_seq_len"]
+            batch, max_seq_len=max_seq_len
         ),
         pin_memory=True,
     )
@@ -98,22 +104,35 @@ def create_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
     return train_loader, val_loader
 
 
-def create_model(config: dict) -> HierarchicalTransformer:
+def create_model(config: dict):
     """Create model from config."""
     model_cfg = config["model"]
+    model_type = model_cfg.get("model_type", "hierarchical")
 
-    model = HierarchicalTransformer(
-        d_model=model_cfg["d_model"],
-        t1_n_heads=model_cfg["t1_n_heads"],
-        t1_n_layers=model_cfg["t1_n_layers"],
-        t1_max_seq_len=model_cfg["t1_max_seq_len"],
-        t1_max_batch_size=model_cfg["t1_max_batch_size"],
-        t2_n_heads=model_cfg["t2_n_heads"],
-        t2_n_layers=model_cfg["t2_n_layers"],
-        t2_max_doms=model_cfg["t2_max_doms"],
-        dropout=model_cfg["dropout"],
-        sensor_geometry_path=None,  # Auto-detect
-    )
+    if model_type == "t2_first_pulse":
+        # T2-only model using first pulse features
+        model = T2FirstPulseModel(
+            d_model=model_cfg["d_model"],
+            n_heads=model_cfg["n_heads"],
+            n_layers=model_cfg["n_layers"],
+            max_doms=model_cfg["max_doms"],
+            dropout=model_cfg["dropout"],
+            geometry_path=None,  # Auto-detect
+        )
+    else:
+        # Standard hierarchical transformer (T1 + T2)
+        model = HierarchicalTransformer(
+            d_model=model_cfg["d_model"],
+            t1_n_heads=model_cfg["t1_n_heads"],
+            t1_n_layers=model_cfg["t1_n_layers"],
+            t1_max_seq_len=model_cfg["t1_max_seq_len"],
+            t1_max_batch_size=model_cfg["t1_max_batch_size"],
+            t2_n_heads=model_cfg["t2_n_heads"],
+            t2_n_layers=model_cfg["t2_n_layers"],
+            t2_max_doms=model_cfg["t2_max_doms"],
+            dropout=model_cfg["dropout"],
+            sensor_geometry_path=None,  # Auto-detect
+        )
 
     return model
 
