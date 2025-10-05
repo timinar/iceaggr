@@ -1,0 +1,49 @@
+# T2 First Pulse - Overfit Test
+# Experiment: t2_overfit
+#
+# PURPOSE: Verify that T2-first-pulse can overfit a tiny dataset.
+# This is the most basic sanity check: can the model memorize a few examples?
+#
+# If this fails, there's a fundamental issue with the model architecture.
+# If this succeeds, we know the model can learn, and issues are in optimization/data.
+
+model:
+  model_type: t2_first_pulse
+  d_model: 128
+  n_heads: 4
+  n_layers: 4
+  max_doms: 2048
+  dropout: 0.0  # No dropout for overfitting
+
+training:
+  # Tiny dataset - just 100 events!
+  max_events: 100
+  batch_size: 32  # Process all ~100 events in 3-4 batches
+  val_split: 0.0  # No validation, just train
+  num_workers: 0
+
+  # Optimization - aggressive for quick overfitting
+  num_epochs: 100  # Train for many epochs
+  learning_rate: 0.001  # Higher LR for faster convergence
+  weight_decay: 0.0  # No regularization
+  grad_clip_norm: 1.0
+  accumulation_steps: 1
+
+  # Checkpointing
+  checkpoint_dir: experiments/baseline_1m/checkpoints_t2_overfit
+  save_every_n_epochs: 10
+
+  # Logging - log every step since we have so few
+  log_dir: logs/t2_overfit
+  log_every_n_steps: 1  # Log every single step!
+  validate_every_n_epochs: 10
+
+  # W&B
+  use_wandb: true
+  wandb_project: iceaggr
+  wandb_run_name: t2-overfit-test
+  wandb_tags:
+    - diagnostic
+    - overfit-test
+    - t2-only
+    - first-pulse
