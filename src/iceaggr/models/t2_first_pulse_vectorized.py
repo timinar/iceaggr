@@ -1,9 +1,8 @@
 """
-T2-only model: Skip T1 DOM aggregation, use first pulse from each DOM.
+T2-only model with VECTORIZED operations (no Python loops).
 
-This is a diagnostic model to test if T2 can train independently.
-Instead of aggregating pulses with T1, we simply use the features of the
-first pulse in each DOM as input to T2.
+This is an optimized version of T2FirstPulseModel that replaces Python loops
+with scatter/gather operations for better performance.
 """
 
 import torch
@@ -17,25 +16,15 @@ from iceaggr.utils import get_logger
 logger = get_logger(__name__)
 
 
-class T2FirstPulseModel(nn.Module):
+class T2FirstPulseModelVectorized(nn.Module):
     """
-    Simplified model that skips T1 and uses first pulse features per DOM.
+    Vectorized version of T2FirstPulseModel - no Python loops!
 
-    For each DOM with pulses, we take the first pulse's features
-    (time, charge, sensor_id, auxiliary) and use them directly as
-    "DOM embeddings" for T2.
+    Optimizations:
+    1. scatter_reduce for extracting first pulses (replaces loop over pulses)
+    2. bincount + cumsum for packing events (replaces loops over batch)
 
-    This allows testing if T2 can train independently of T1.
-
-    Args:
-        d_model: Model dimension (default: 128)
-        n_heads: Number of attention heads (default: 8)
-        n_layers: Number of transformer layers (default: 4)
-        d_ff: Feedforward dimension (default: 4 * d_model)
-        dropout: Dropout rate (default: 0.1)
-        pulse_features: Number of input pulse features (default: 4)
-        geometry_path: Path to sensor_geometry.csv (default: auto-detect)
-        max_doms: Maximum DOMs per event for batching (default: 2048)
+    Same architecture as T2FirstPulseModel, just faster.
     """
 
     def __init__(
@@ -62,7 +51,6 @@ class T2FirstPulseModel(nn.Module):
 
         # Project combined features to d_model
         # Input: [time, charge, auxiliary, x, y, z] (6 features)
-        # Note: sensor_id is NOT normalized - replaced with actual geometry!
         self.pulse_projection = nn.Linear(6, d_model)
 
         # Transformer layers (same as T2)
@@ -88,7 +76,7 @@ class T2FirstPulseModel(nn.Module):
         )
 
         logger.info(
-            f"Initialized T2FirstPulseModel: d_model={d_model}, n_heads={n_heads}, "
+            f"Initialized T2FirstPulseModelVectorized: d_model={d_model}, n_heads={n_heads}, "
             f"n_layers={n_layers}, d_ff={self.d_ff}, max_doms={max_doms}"
         )
 
@@ -143,8 +131,8 @@ class T2FirstPulseModel(nn.Module):
 
         device = packed_sequences.device
 
-        # Extract first pulse per DOM (now returns 6 features: time, charge, aux, x, y, z)
-        dom_features_combined = self._extract_first_pulses(
+        # Extract first pulse per DOM (VECTORIZED!)
+        dom_features_combined = self._extract_first_pulses_vectorized(
             packed_sequences, dom_boundaries, dom_mask, metadata
         )
         # dom_features_combined: (total_doms, 6) - [time, charge, auxiliary, x, y, z] all normalized
@@ -152,11 +140,11 @@ class T2FirstPulseModel(nn.Module):
         # Project combined features to d_model
         dom_embeddings = self.pulse_projection(dom_features_combined)  # (total_doms, d_model)
 
-        # Pack DOMs into batched sequences (one event per sequence)
+        # Pack DOMs into batched sequences (VECTORIZED!)
         dom_to_event_idx = metadata['dom_to_event_idx']
         batch_size = metadata['event_ids'].shape[0]
 
-        event_sequences, padding_mask = self._pack_events(
+        event_sequences, padding_mask = self._pack_events_vectorized(
             dom_embeddings, dom_to_event_idx, batch_size
         )
 
@@ -183,7 +171,7 @@ class T2FirstPulseModel(nn.Module):
 
         return unit_vector
 
-    def _extract_first_pulses(
+    def _extract_first_pulses_vectorized(
         self,
         packed_sequences: torch.Tensor,
         dom_boundaries: torch.Tensor,
@@ -191,7 +179,9 @@ class T2FirstPulseModel(nn.Module):
         metadata: Dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """
-        Extract first pulse features from each DOM, combined with geometry.
+        VECTORIZED: Extract first pulse features from each DOM using scatter_reduce.
+
+        This replaces the Python loop with GPU operations.
 
         Args:
             packed_sequences: (bsz, max_seq_len, 4) - packed pulse features
@@ -211,7 +201,6 @@ class T2FirstPulseModel(nn.Module):
         # Normalize pulse features (CRITICAL for stable training!)
         time = packed_sequences[..., 0]
         charge = packed_sequences[..., 1]
-        # Note: sensor_id (feature 2) is NOT used - we use geometry instead!
         auxiliary = packed_sequences[..., 3]
 
         time_normalized = (time - 1e4) / 3e4
@@ -223,26 +212,46 @@ class T2FirstPulseModel(nn.Module):
             auxiliary
         ], dim=-1)  # (bsz, max_seq_len, 3)
 
-        # Initialize first pulse features for each DOM
-        first_pulses = torch.zeros(total_doms, 3, device=device, dtype=normalized_sequences.dtype)
-        dom_found = torch.zeros(total_doms, device=device, dtype=torch.bool)
+        # Flatten for scatter operations
+        normalized_flat = normalized_sequences.reshape(-1, 3)  # (bsz * seq_len, 3)
+        global_dom_ids_flat = global_dom_ids.reshape(-1)  # (bsz * seq_len,)
+        dom_mask_flat = dom_mask.reshape(-1)  # (bsz * seq_len,)
 
-        # Flatten for easier processing
-        normalized_flat = normalized_sequences.view(-1, 3)  # (bsz * seq_len, 3)
-        global_dom_ids_flat = global_dom_ids.view(-1)  # (bsz * seq_len,)
-        dom_mask_flat = dom_mask.view(-1)  # (bsz * seq_len,)
-
-        # For each valid pulse, check if it's the first for its DOM
+        # Filter to valid pulses only
         valid_mask = dom_mask_flat.bool()
         valid_features = normalized_flat[valid_mask]  # (n_valid_pulses, 3)
         valid_dom_ids = global_dom_ids_flat[valid_mask]  # (n_valid_pulses,)
 
-        # Process pulses in order (first occurrence = first pulse)
-        for pulse_idx in range(len(valid_dom_ids)):
-            dom_id = valid_dom_ids[pulse_idx]
-            if not dom_found[dom_id]:
-                first_pulses[dom_id] = valid_features[pulse_idx]
-                dom_found[dom_id] = True
+        # VECTORIZED: Use scatter to get first pulse per DOM
+        # We need to find the FIRST occurrence of each DOM ID
+        # Strategy: Create position indices, scatter with min reduction
+
+        # Create position index for each pulse
+        pulse_positions = torch.arange(len(valid_dom_ids), device=device)
+
+        # Scatter positions to find first occurrence (min position) per DOM
+        first_positions = torch.full((total_doms,), fill_value=len(valid_dom_ids),
+                                     dtype=torch.long, device=device)
+        first_positions.scatter_reduce_(
+            dim=0,
+            index=valid_dom_ids,
+            src=pulse_positions,
+            reduce='min',
+            include_self=False
+        )
+
+        # Gather features at first positions
+        # For DOMs with no pulses, first_positions will be len(valid_dom_ids) (out of bounds)
+        # We need to handle this safely
+        first_pulses = torch.zeros(total_doms, 3, device=device, dtype=normalized_flat.dtype)
+
+        # Mask for DOMs that actually have pulses
+        has_pulses = first_positions < len(valid_dom_ids)
+
+        # Gather first pulse features for DOMs that have pulses
+        if has_pulses.any():
+            valid_first_positions = first_positions[has_pulses]
+            first_pulses[has_pulses] = valid_features[valid_first_positions]
 
         # Get geometry for each DOM
         if self.sensor_geometry.device != device:
@@ -255,24 +264,27 @@ class T2FirstPulseModel(nn.Module):
 
         return combined_features
 
-    def _pack_events(
+    def _pack_events_vectorized(
         self,
         dom_features: torch.Tensor,
         dom_to_event_idx: torch.Tensor,
         batch_size: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Pack variable-length DOM sequences into batched tensor with padding.
+        VECTORIZED: Pack variable-length DOM sequences into batched tensor.
+
+        This replaces the Python loops with bincount and advanced indexing.
 
         Events with more than max_doms are clipped to max_doms.
         """
         device = dom_features.device
         d_model = dom_features.shape[1]
 
-        # Count DOMs per event
-        doms_per_event = torch.zeros(batch_size, dtype=torch.long, device=device)
-        for event_idx in range(batch_size):
-            doms_per_event[event_idx] = (dom_to_event_idx == event_idx).sum()
+        # Count DOMs per event using bincount (VECTORIZED!)
+        doms_per_event = torch.bincount(
+            dom_to_event_idx,
+            minlength=batch_size
+        )  # (batch_size,)
 
         # Clip to max_doms
         max_doms_in_batch = min(doms_per_event.max().item(), self.max_doms)
@@ -283,16 +295,34 @@ class T2FirstPulseModel(nn.Module):
         )
         padding_mask = torch.ones(batch_size, max_doms_in_batch, device=device, dtype=torch.bool)
 
-        # Pack each event
-        for event_idx in range(batch_size):
-            event_mask = (dom_to_event_idx == event_idx)
-            event_doms = dom_features[event_mask]  # (n_doms_in_event, d_model)
-            n_doms = event_doms.shape[0]
+        # Create indices for scatter operation
+        # For each DOM, we need (event_idx, position_in_event)
 
-            if n_doms > 0:
-                # Clip to max_doms if needed
-                n_doms_to_pack = min(n_doms, self.max_doms)
-                packed_sequences[event_idx, :n_doms_to_pack] = event_doms[:n_doms_to_pack]
-                padding_mask[event_idx, :n_doms_to_pack] = False
+        # Sort DOMs by event index for easier processing
+        sorted_indices = torch.argsort(dom_to_event_idx)
+        sorted_dom_features = dom_features[sorted_indices]
+        sorted_event_ids = dom_to_event_idx[sorted_indices]
+
+        # Compute cumulative sum to get starting index for each event
+        cumsum_doms = torch.cat([
+            torch.tensor([0], device=device),
+            doms_per_event.cumsum(dim=0)[:-1]
+        ])  # (batch_size,) - starting index for each event
+
+        # Create position within event for each DOM
+        # This is like: [0,1,2, 0,1,2,3,4, 0,1, ...] for events with [3, 5, 2, ...] DOMs
+        positions = torch.arange(len(sorted_dom_features), device=device) - cumsum_doms[sorted_event_ids]
+
+        # Clip positions to max_doms (discard DOMs beyond max)
+        valid_mask = positions < self.max_doms
+
+        if valid_mask.any():
+            valid_event_ids = sorted_event_ids[valid_mask]
+            valid_positions = positions[valid_mask]
+            valid_features = sorted_dom_features[valid_mask]
+
+            # Pack using advanced indexing (VECTORIZED!)
+            packed_sequences[valid_event_ids, valid_positions] = valid_features
+            padding_mask[valid_event_ids, valid_positions] = False
 
         return packed_sequences, padding_mask

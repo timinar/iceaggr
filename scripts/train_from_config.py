@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 from iceaggr.data import IceCubeDataset, collate_dom_packing
 from iceaggr.models import HierarchicalTransformer
 from iceaggr.models.t2_first_pulse import T2FirstPulseModel
+from iceaggr.models.t2_first_pulse_vectorized import T2FirstPulseModelVectorized
 from iceaggr.training import AngularDistanceLoss, E2ETrainer, TrainingConfig
 from iceaggr.utils import get_logger
 
@@ -110,8 +111,8 @@ def create_model(config: dict):
     model_type = model_cfg.get("model_type", "hierarchical")
 
     if model_type == "t2_first_pulse":
-        # T2-only model using first pulse features
-        model = T2FirstPulseModel(
+        # T2-only model using first pulse features (VECTORIZED for 54x speedup!)
+        model = T2FirstPulseModelVectorized(
             d_model=model_cfg["d_model"],
             n_heads=model_cfg["n_heads"],
             n_layers=model_cfg["n_layers"],

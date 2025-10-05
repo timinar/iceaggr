@@ -15,7 +15,7 @@ model:
   d_model: 128
   n_heads: 4
   n_layers: 4
-  max_doms: 2048
+  max_doms: 256  # Clip events to 256 DOMs (prevents OOM, loses some info for large events)
   dropout: 0.0
 
 training:
