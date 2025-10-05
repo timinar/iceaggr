@@ -14,14 +14,14 @@ model:
   dropout: 0.0
 
 training:
-  # Data - use moderate size for quick iteration
-  max_events: 10000  # 10K events for quick training
+  # Data - FULL 1M EVENTS!
+  max_events: 1000000  # 1M events - full training
   batch_size: 128  # Moderate batch size
   val_split: 0.1
   num_workers: 0
 
   # Optimization
-  num_epochs: 10
+  num_epochs: 20  # More epochs for 1M events
   learning_rate: 0.0003  # 3e-4
   weight_decay: 0.00001  # 1e-5
   grad_clip_norm: 1.0
@@ -31,18 +31,18 @@ training:
   checkpoint_dir: experiments/baseline_1m/checkpoints_t2_verbose
   save_every_n_epochs: 999999  # Never save (set to huge number)
 
-  # Logging - VERBOSE!
-  log_dir: logs/t2_verbose
-  log_every_n_steps: 1  # Log EVERY step for detailed monitoring
+  # Logging - Still verbose but not EVERY step (too much for 1M events)
+  log_dir: logs/t2_verbose_1m
+  log_every_n_steps: 50  # Log every 50 steps (still ~140 logs per epoch)
   validate_every_n_epochs: 1
 
   # W&B - with all the metrics!
   use_wandb: true
   wandb_project: iceaggr
-  wandb_run_name: t2-verbose-monitoring
+  wandb_run_name: t2-verbose-1m
   wandb_tags:
     - diagnostic
     - t2-only
     - first-pulse
     - verbose-metrics
-    - 10k-events
+    - 1m-events
