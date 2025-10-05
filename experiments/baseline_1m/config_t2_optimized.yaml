@@ -1,0 +1,58 @@
+# T2 First Pulse - OPTIMIZED for Performance
+# Experiment: t2_optimized
+#
+# OPTIMIZATIONS APPLIED:
+# 1. Batch size 128 → 1024 (8x larger, GPU usage is only 0.07GB!)
+# 2. Multi-worker data loading (num_workers: 4)
+# 3. Mixed precision training (AMP) for 2-3x speedup
+# 4. Learning rate scaled for larger batch: 3e-4 → 8.5e-4 (sqrt scaling)
+# 5. Gradient accumulation if needed
+#
+# EXPECTED SPEEDUP: ~16-20x faster (51 hours → 2-3 hours!)
+
+model:
+  model_type: t2_first_pulse
+  d_model: 128
+  n_heads: 4
+  n_layers: 4
+  max_doms: 2048
+  dropout: 0.0
+
+training:
+  # Data - FULL 1M EVENTS!
+  max_events: 1000000
+  batch_size: 1024  # 8x larger! GPU has tons of headroom
+  val_split: 0.1
+  num_workers: 4  # Parallel data loading (was 0!)
+
+  # Optimization - tuned for larger batch size
+  num_epochs: 20
+  learning_rate: 0.00085  # Scaled by sqrt(8) for larger batch
+  weight_decay: 0.00001
+  grad_clip_norm: 1.0
+  accumulation_steps: 1
+
+  # Mixed precision training
+  use_amp: true  # Enable automatic mixed precision (fp16)
+
+  # Checkpointing - disabled
+  checkpoint_dir: experiments/baseline_1m/checkpoints_t2_optimized
+  save_every_n_epochs: 999999
+
+  # Logging - verbose monitoring
+  log_dir: logs/t2_optimized
+  log_every_n_steps: 50
+  validate_every_n_epochs: 1
+
+  # W&B
+  use_wandb: true
+  wandb_project: iceaggr
+  wandb_run_name: t2-optimized-1m
+  wandb_tags:
+    - optimized
+    - t2-only
+    - first-pulse
+    - 1m-events
+    - batch-1024
+    - amp
+    - fast-training

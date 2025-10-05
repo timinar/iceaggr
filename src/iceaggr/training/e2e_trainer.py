@@ -32,6 +32,9 @@ class TrainingConfig:
     # Gradient accumulation
     accumulation_steps: int = 1  # Number of mini-batches to accumulate
 
+    # Mixed precision training
+    use_amp: bool = False  # Enable automatic mixed precision (fp16)
+
     # Checkpointing
     checkpoint_dir: str = "checkpoints"
     save_every_n_epochs: int = 1
@@ -75,6 +78,12 @@ class E2ETrainer:
         # Training state
         self.current_epoch = 0
         self.global_step = 0
+
+        # Mixed precision training (AMP)
+        self.scaler = None
+        if config.use_amp and torch.cuda.is_available():
+            self.scaler = torch.cuda.amp.GradScaler()
+            logger.info("Mixed precision training (AMP) enabled")
 
         # Checkpointing
         self.checkpoint_dir = Path(config.checkpoint_dir)
@@ -122,30 +131,38 @@ class E2ETrainer:
             batch = self._batch_to_device(batch)
             data_load_time = time.time() - step_start
 
-            # Forward pass: T1 → T2 → predictions
+            # Forward pass with optional AMP
             forward_start = time.time()
-            predictions = self.model(batch)  # (batch_size, 2) or (batch_size, 3) for unit vectors
+            if self.scaler is not None:
+                # Mixed precision forward pass
+                with torch.cuda.amp.autocast():
+                    predictions = self.model(batch)  # (batch_size, 2) or (batch_size, 3) for unit vectors
+                    targets = batch["metadata"]["targets"]  # (batch_size, 2)
+                    loss = self.loss_fn(predictions, targets)
+                    loss = loss / self.config.accumulation_steps
+            else:
+                # Standard fp32 forward pass
+                predictions = self.model(batch)
+                targets = batch["metadata"]["targets"]
+                loss = self.loss_fn(predictions, targets)
+                loss = loss / self.config.accumulation_steps
             forward_time = time.time() - forward_start
 
-            # Get targets from metadata
-            targets = batch["metadata"]["targets"]  # (batch_size, 2)
-
-            # Compute loss
-            loss = self.loss_fn(predictions, targets)
-
-            # Scale loss by accumulation steps
-            loss = loss / self.config.accumulation_steps
-
-            # Backward pass
+            # Backward pass with optional AMP
             backward_start = time.time()
-            loss.backward()
+            if self.scaler is not None:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
             backward_time = time.time() - backward_start
 
             # Optimizer step every accumulation_steps
             if (step + 1) % self.config.accumulation_steps == 0 or (step + 1) == len(
                 train_loader
             ):
-                # Compute gradient norm BEFORE clipping
+                # Compute gradient norm BEFORE clipping (unscale first if using AMP)
+                if self.scaler is not None:
+                    self.scaler.unscale_(self.optimizer)
                 grad_norm = self._compute_grad_norm()
 
                 # Gradient clipping
@@ -154,9 +171,13 @@ class E2ETrainer:
                         self.model.parameters(), self.config.grad_clip_norm
                     )
 
-                # Optimizer step
+                # Optimizer step with optional AMP
                 optim_start = time.time()
-                self.optimizer.step()
+                if self.scaler is not None:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
                 self.optimizer.zero_grad()
                 optim_time = time.time() - optim_start
 

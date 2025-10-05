@@ -195,6 +195,7 @@ def main():
         weight_decay=train_cfg["weight_decay"],
         grad_clip_norm=train_cfg["grad_clip_norm"],
         accumulation_steps=train_cfg["accumulation_steps"],
+        use_amp=train_cfg.get("use_amp", False),
         checkpoint_dir=str(checkpoint_dir),
         save_every_n_epochs=train_cfg["save_every_n_epochs"],
         log_every_n_steps=train_cfg["log_every_n_steps"],
