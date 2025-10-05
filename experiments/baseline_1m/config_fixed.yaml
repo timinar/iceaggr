@@ -3,7 +3,7 @@
 #
 # FIXES APPLIED:
 # 1. ✅ Input normalization: time, charge, geometry (CRITICAL - prevents NaN!)
-# 2. ✅ Added dropout: 0.0 → 0.1 (regularization)
+# 2. ✅ Dropout: Start at 0.0 (add regularization later after stability confirmed)
 # 3. ✅ LR: Keep at 3e-4 (works great with normalization)
 
 model:
@@ -20,7 +20,7 @@ model:
   t2_max_doms: 2048
 
   # Other
-  dropout: 0.1  # CHANGED from 0.0
+  dropout: 0.0  # Start with 0, add later after model is stable
 
 training:
   # Data

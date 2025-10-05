@@ -208,8 +208,25 @@ class DOMTransformer(nn.Module):
             mini_batch_mask = dom_mask[start_idx:end_idx]
             mini_batch_global_ids = metadata['global_dom_ids'][start_idx:end_idx]
 
-            # Forward pass on mini-batch
-            x = self.input_projection(mini_batch_seqs)
+            # Normalize features (CRITICAL!)
+            time = mini_batch_seqs[..., 0]
+            charge = mini_batch_seqs[..., 1]
+            sensor_id = mini_batch_seqs[..., 2]
+            auxiliary = mini_batch_seqs[..., 3]
+
+            time_normalized = (time - 1e4) / 3e4
+            charge_normalized = torch.log10(charge + 1e-8) / 3.0
+            sensor_id_normalized = sensor_id / 5160.0
+
+            mini_batch_seqs_normalized = torch.stack([
+                time_normalized,
+                charge_normalized,
+                sensor_id_normalized,
+                auxiliary
+            ], dim=-1)
+
+            # Forward pass on mini-batch with normalized features
+            x = self.input_projection(mini_batch_seqs_normalized)
 
             # Note: dom_boundaries and dom_mask are sliced, so indices b are relative to mini-batch
             def dom_boundary_mask(score, b, h, q_idx, kv_idx):
