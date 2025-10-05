@@ -21,13 +21,13 @@ model:
 training:
   # Data - FULL 1M EVENTS!
   max_events: 1000000
-  batch_size: 512  # 4x larger (1024 was OOM, 512 should work)
+  batch_size: 4096  # 8x larger than 512 (only using ~4% GPU memory!)
   val_split: 0.1
   num_workers: 4  # Parallel data loading (was 0!)
 
   # Optimization - tuned for larger batch size
   num_epochs: 20
-  learning_rate: 0.0006  # Scaled by sqrt(4) = 2x for 4x larger batch
+  learning_rate: 0.0017  # Scaled by sqrt(64) = 8x from base 0.00021
   weight_decay: 0.00001
   grad_clip_norm: 1.0
   accumulation_steps: 1
@@ -42,7 +42,7 @@ training:
   # Logging - verbose monitoring
   log_dir: logs/t2_optimized
   log_every_n_steps: 50
-  validate_every_n_epochs: 999999  # Skip validation (causes OOM on extreme events)
+  validate_every_n_epochs: 1  # Validate every epoch (max_doms=256 prevents OOM)
 
   # W&B
   use_wandb: true
