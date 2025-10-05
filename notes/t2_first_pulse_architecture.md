@@ -93,6 +93,7 @@ dom_embeddings = pulse_projection(first_pulse_features)
 ---
 
 ### **STEP 4: ADD GEOMETRY ENCODING** (`geometry_encoder`)
+***IT: Outdated: xyz positions should be included on the previous step instead of this separate encoding.***
 
 **Load Geometry:**
 ```python
