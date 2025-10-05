@@ -7,6 +7,7 @@ A research project developing transformer models for precise angular reconstruct
 > **New to the project?** See setup instructions for [installing UV](#install-uv) and [downloading IceCube data](#download-icecube-kaggle-data) at the end of this README.
 
 ## 🚀 Quick Start
+
 We use `uv` (the modern Python package manager) throughout the project for dependency management and running code (see [installing UV](#install-uv)).
 
 **First time setup:**
@@ -27,8 +28,8 @@ uv run python scripts/2029_09_08_pulse_statistics.py
 # Sync dependencies (run after pulling changes)
 uv sync
 
-# Run analysis scripts
-uv run python scripts/2029_09_08_pulse_statistics.py
+# Run scripts
+uv run python scripts/train_from_config.py experiments/baseline_1m/config_fixed.yaml
 ```
 
 ## 🎯 Common Commands
@@ -36,9 +37,6 @@ uv run python scripts/2029_09_08_pulse_statistics.py
 ```bash
 # Jupyter notebooks
 uv run jupyter lab
-
-# Run scripts
-uv run python scripts/your_script.py
 
 # Testing
 uv run pytest                    # All tests
@@ -50,7 +48,7 @@ uv run ruff check .              # Check for issues
 uv run mypy src/                 # Type checking
 
 # Dependencies
-uv add package-name              # Add new package. Updates pyproject.toml
+uv add package-name              # Add new package
 uv add --dev dev-tool            # Add dev dependency
 uv sync                          # Install/update all dependencies
 ```
@@ -75,63 +73,86 @@ Pulses → [DOM-level Transformer (T1)] → DOM embeddings → [Event-level Tran
 **Two-stage processing:**
 1. **T1 (DOM-level)**: Aggregates pulses within each DOM using transformer → produces DOM embedding
    - Most DOMs: 1-10 pulses (fast)
-   - Some DOMs: 100s-1000s of pulses (need chunking/windowed attention)
-   - Runs in parallel across all DOMs (with smart batching)
+   - Some DOMs: 100s-1000s of pulses (handled via packing + FlexAttention)
+   - Runs in parallel across all DOMs with smart batching
 
 2. **T2 (Event-level)**: Aggregates DOM embeddings across the event → predicts direction
    - Max ~2000 active DOMs per event (manageable sequence length)
-   - Can incorporate DOM geometry (x,y,z positions)
+   - Incorporates DOM geometry (x,y,z positions)
 
-### Key Technical Challenges
+### Key Technical Features
 
-1. **Variable sequence lengths**:
-   - 1 pulse/DOM to 1000s of pulses/DOM
-   - Need efficient batching strategy
-
-2. **Parallel DOM processing**:
-   - Continuous batching with attention masking
-   - PyTorch FlexAttention for dynamic sequence lengths
-
-3. **Single-pulse DOMs**:
-   - ~50-70% of DOMs have ≤10 pulses
-   - Need lightweight path or learned aggregation
-
-4. **Data loading**:
-   - Pre-group pulses by DOM
-   - Efficient batching for variable-length sequences
-   - Potential caching of DOM embeddings
+- **Input normalization**: Critical for stable training (time, charge, sensor_id, geometry)
+- **DOM-level packing**: Multiple sparse DOMs packed into fixed-length sequences
+- **FlexAttention**: Dynamic attention masking for variable-length sequences
+- **Hierarchical batching**: Efficient GPU utilization via continuous batching
 
 ## 📁 Project Structure
 
 ```
 iceaggr/
-├── src/iceaggr/              # Main code (importable package)
-│   ├── config/              # Configuration utilities
-│   ├── data/                # Data loading code (DataLoaders, etc.)
-│   ├── models/              # Model architectures (T1, T2 transformers)
-│   ├── training/            # Training loops and utilities
-│   └── utils/               # Utilities (logging, metrics, etc.)
-├── configs/                 # Experiment configurations
-│   ├── experiment/          # Full experiment configs
-│   └── model/               # Model-specific configs
-├── notebooks/               # Jupyter notebooks for exploration
-├── scripts/                 # Standalone scripts (analysis, training)
-├── tests/                   # Unit and integration tests
-└── pyproject.toml           # Project dependencies and settings
+├── src/iceaggr/              # Main package (importable)
+│   ├── data/                # Data loading with DOM-level batching
+│   ├── models/              # T1 (DOM) & T2 (Event) transformers
+│   ├── training/            # Training loops, losses, metrics
+│   └── utils/               # Logging utilities
+├── experiments/             # Experiment configurations
+│   └── baseline_1m/         # 1M events baseline experiment
+├── scripts/                 # Standalone scripts
+│   ├── train_from_config.py # Main training script
+│   ├── archive/             # Benchmark & analysis scripts
+│   └── debug/               # One-time debugging scripts
+├── notes/                   # Architecture documentation
+├── notebooks/               # Jupyter exploration
+├── tests/                   # Unit & integration tests
+└── START_TRAINING.sh        # Quick training launcher
 ```
 
-**Notes**:
-- Core package structure (`src/`, `tests/`, `notebooks/`, `configs/`) will be created as development progresses
-- `data_config.yaml` lives in `src/iceaggr/data/` (gitignored, copy from template)
+**Note**: `data_config.yaml` lives in `src/iceaggr/data/` (gitignored, copy from template)
 
 ## 🧪 Current Progress
 
-- [x] Data exploration and statistics (see [scripts/2029_09_08_pulse_statistics.py](scripts/2029_09_08_pulse_statistics.py))
-- [x] Dataloader implementation with continuous batching (see [src/iceaggr/data/](src/iceaggr/data/))
-- [ ] DOM-level transformer (T1) with FlexAttention
-- [ ] Event-level transformer (T2)
-- [ ] End-to-end training pipeline
-- [ ] Comparison with spline-mpe baseline
+- [x] Data exploration and statistics
+- [x] Dataloader with DOM-level batching and packing
+- [x] DOM-level transformer (T1) with FlexAttention
+- [x] Event-level transformer (T2) with geometry encoding
+- [x] End-to-end training pipeline with W&B integration
+- [ ] Baseline evaluation and comparison with spline-mpe
+- [ ] Hyperparameter optimization
+
+## 🚂 Training
+
+Start training with one command:
+
+```bash
+./START_TRAINING.sh
+```
+
+This will:
+- Run training in a background screen session
+- Log to `logs/baseline_1m_fixed/training_YYYYMMDD_HHMMSS.log`
+- Save checkpoints every epoch to `experiments/baseline_1m/checkpoints_fixed/`
+- Track metrics on W&B
+
+**Monitor progress:**
+```bash
+# Reattach to training session
+screen -r training
+
+# Follow log file
+tail -f logs/baseline_1m_fixed/training_*.log
+
+# View on W&B
+# https://wandb.ai/polargeese/iceaggr
+```
+
+**Stop training:**
+```bash
+screen -r training    # Reattach
+# Press Ctrl+C         # Stop
+```
+
+See [experiments/baseline_1m/config_fixed.yaml](experiments/baseline_1m/config_fixed.yaml) for training configuration.
 
 ## 🤝 Contributing
 
@@ -161,7 +182,6 @@ wandb.log({"loss": loss, "angular_error": error})
 
 - [IceCube Competition](https://www.kaggle.com/competitions/icecube-neutrinos-in-deep-ice)
 - [PyTorch FlexAttention](https://pytorch.org/blog/flexattention/)
-- [PyTorch Lightning](https://lightning.ai/docs/pytorch/stable/)
 - [Weights & Biases](https://docs.wandb.ai/)
 - [UV Documentation](https://docs.astral.sh/uv/)
 

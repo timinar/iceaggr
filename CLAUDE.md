@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **iceaggr** is a research project developing hierarchical transformer models for precise angular reconstruction of high-energy neutrino events in IceCube. The key challenge is handling events with thousands of pulses using DOM-level aggregation.
 
-### Core Architecture Concept
+### Core Architecture
 
 The project implements a two-stage hierarchical transformer:
 
@@ -18,12 +18,12 @@ The project implements a two-stage hierarchical transformer:
    - Input: DOM embeddings + geometry (x,y,z positions)
    - Max ~2000 active DOMs per event (manageable for standard attention)
 
-### Key Technical Challenges
+### Key Technical Features
 
-- **Variable-length sequences**: 1 pulse/DOM to 1000s of pulses/DOM requiring efficient batching
-- **Parallel DOM processing**: Using continuous batching with attention masking
-- **Single-pulse DOMs**: ~50-70% of DOMs have ≤10 pulses, need lightweight path
-- **Heavy-tailed distribution**: Some events have 10K+ pulses requiring special handling
+- **Input normalization**: CRITICAL for training stability (time, charge, sensor_id, geometry)
+- **DOM-level packing**: Multiple sparse DOMs packed into fixed-length sequences  
+- **FlexAttention**: Dynamic attention masking for variable-length sequences
+- **Hierarchical batching**: Efficient GPU utilization via continuous batching
 
 ## Development Setup
 
@@ -49,11 +49,8 @@ uv sync --upgrade
 # Run Python scripts
 uv run python scripts/script_name.py
 
-# Start Jupyter Lab for notebooks (automatically uses correct Python kernel)
+# Start Jupyter Lab for notebooks
 uv run jupyter lab
-
-# IMPORTANT: In notebooks, the iceaggr package is available after running `uv sync`
-# The kernel "Python 3 (ipykernel)" uses the UV environment automatically
 
 # Run tests
 uv run pytest                    # All tests
@@ -72,40 +69,31 @@ uv run mypy src/                 # Type checking
 
 ```
 iceaggr/
-├── src/iceaggr/              # Main code (importable package)
-│   ├── config/              # Configuration utilities (to be created)
-│   ├── data/                # DataLoaders with DOM grouping ✓
-│   ├── models/              # T1 and T2 transformer architectures ✓
-│   ├── training/            # Training loops and utilities (to be created)
-│   └── utils/               # Logging utilities ✓
-├── configs/                 # Experiment configurations (to be created)
-│   ├── experiment/          # Full experiment configs
-│   └── model/               # Model-specific configs
-├── notes/                   # Design documentation (committed) ✓
-│   ├── dom_aggregation_architecture.md         # Architecture design
-│   └── flex_attention_benchmark_results.md     # FlexAttention benchmarks
-├── personal_notes/          # Personal notes, experiments (gitignored)
-│   └── 03_t1_memory_constraints.md             # T1 memory solution
-├── scripts/                 # Analysis & benchmarking scripts ✓
-│   ├── benchmark_*.py       # Exploratory performance analysis
-│   └── analyze_*.py         # Data/model analysis tools
-├── notebooks/               # Jupyter notebooks for experiments
-├── tests/                   # Automated tests ✓
-│   ├── unit/                # Unit tests (fast, isolated)
-│   ├── integration/         # Integration tests
-│   └── benchmarks/          # Performance regression tests (pytest)
-├── src/iceaggr/data/data_config.yaml         # Local data paths (gitignored) ✓
-├── src/iceaggr/data/data_config.template.yaml # Template for data paths ✓
-└── pyproject.toml           # Dependencies and project config ✓
+├── src/iceaggr/              # Main package (importable)
+│   ├── data/                # Data loading with DOM packing
+│   ├── models/              # T1 (DOM) & T2 (Event) transformers
+│   ├── training/            # Training loops, losses, metrics
+│   └── utils/               # Logging utilities
+├── experiments/             # Experiment configurations
+│   └── baseline_1m/         # 1M events baseline (config, checkpoints)
+├── scripts/                 # Standalone scripts
+│   ├── train_from_config.py # Main training script
+│   ├── archive/             # Benchmark & analysis scripts
+│   └── debug/               # One-time debugging scripts
+├── notes/                   # Architecture documentation
+├── personal_notes/          # Session notes (gitignored)
+├── notebooks/               # Jupyter exploration
+├── tests/                   # Unit & integration tests
+└── START_TRAINING.sh        # Quick training launcher
 ```
 
-**Current state**: T1 (DOM-level) complete (✓). Data loading complete (✓). Next: T2 implementation.
+**Current state**: ✅ E2E pipeline complete! T1, T2, data loading, training all working.
 
 ## Configuration Management
 
 The project uses a simple two-tier config approach:
 
-1. **Data paths** (`src/iceaggr/data/data_config.yaml` in root):
+1. **Data paths** (`src/iceaggr/data/data_config.yaml`):
    - Gitignored, local to each user
    - Contains **only data paths** (train, test directories)
    - Copy from `src/iceaggr/data/data_config.template.yaml` and modify
@@ -118,10 +106,10 @@ The project uses a simple two-tier config approach:
        batch_pattern: "batch_*.parquet"
      ```
 
-2. **Experiment configs** (`configs/` directory - to be created):
+2. **Experiment configs** (`experiments/` directory):
    - Committed to git
    - Model architectures, training params, logging settings
-   - Organized by experiment type
+   - See `experiments/baseline_1m/config_fixed.yaml` for example
 
 Load data config in code:
 ```python
@@ -135,60 +123,53 @@ train_path = config["data"]["train"]
 
 **Important**: All scripts should use `src/iceaggr/data/data_config.yaml` for data paths, not hardcoded paths!
 
-## Data Architecture
+## Training
 
-### IceCube Dataset Structure
+### Start Training
 
-- **Location**: `/groups/pheno/inar/icecube_kaggle/train/`
-- **Format**: Parquet files (`batch_*.parquet`)
-- **Size**: ~20GB compressed total
+```bash
+./START_TRAINING.sh
+```
 
-### Key Data Characteristics (from pulse analysis)
+This runs training in a screen session with logging.
 
-Based on analysis in [scripts/2029_09_08_pulse_statistics.py](scripts/2029_09_08_pulse_statistics.py):
+### Monitor Training
 
-- **DOMs per event**:
-  - Median: varies by batch
-  - 99th percentile: <2000 DOMs (manageable for T2)
-  - Max: 5160 DOMs (full detector)
+```bash
+# Reattach to screen session
+screen -r training
 
-- **Pulses per DOM** (critical for T1 design):
-  - 50-70% of DOMs have ≤10 pulses (sparse, lightweight path needed)
-  - 99th percentile: determines max sequence length for T1
-  - Heavy tail: Some DOMs have 1000s of pulses (need chunking/windowed attention)
+# Follow log file  
+tail -f logs/baseline_1m_fixed/training_*.log
 
-- **Event sizes**:
-  - Most events: <1K total pulses
-  - Large events: 1K-10K pulses
-  - Extreme outliers: >100K pulses (need special handling)
+# View on W&B
+# https://wandb.ai/polargeese/iceaggr
+```
 
-### Batching Strategy Considerations
+### Training Configuration
 
-The analysis script recommends either:
-- **Option 2**: Grouped batch processing (if data is well-behaved)
-- **Option 3**: Continuous/flattened batching with FlexAttention (for heavy-tailed distributions)
-
-Choice depends on specific data distribution - run pulse statistics first.
+Current experiment: `experiments/baseline_1m/config_fixed.yaml`
+- Model: 1.6M parameters (d_model=128, 4 layers each for T1 and T2)
+- Training: 900K events, batch_size=256, LR=3e-4, dropout=0.1
+- **Input normalization**: Enabled (CRITICAL!)
+  - time: `(time - 1e4) / 3e4`
+  - charge: `log10(charge + 1e-8) / 3.0`
+  - sensor_id: `sensor_id / 5160.0`
+  - geometry: `geometry / 500.0`
 
 ## Experiment Tracking
 
-### Weights & Biases Integration
+We use Weights & Biases:
 
 ```python
 import wandb
 
-# Initialize experiment
 wandb.init(
     project="iceaggr",
     name="component-description-version-yourname",
     tags=["component-type", "experiment-type"]
 )
 
-# Example names:
-# - "dom-transformer-baseline-v1-alice"
-# - "event-transformer-geom-v2-bob"
-
-# Log during training
 wandb.log({"loss": loss, "angular_error": angular_err})
 ```
 
@@ -201,15 +182,6 @@ wandb.log({"loss": loss, "angular_error": angular_err})
 
 - **W&B runs**: `component-description-version-yourname`
 - **Tags**: `["dom-level" | "event-level" | "e2e", experiment-type, yourname]`
-
-## Important Data Insights
-
-From the data analysis, keep in mind:
-
-1. **Most events are sparse**: 99% of events activate <5% of the detector
-2. **DOM-level sparsity**: Median pulses per DOM is very low (often <5)
-3. **Memory planning**: Batch size 32 at 99th percentile events is manageable, but worst-case can OOM
-4. **Special handling needed**: Events >100K pulses may need reservoir sampling or splitting
 
 ## Logging
 
@@ -228,75 +200,6 @@ logger.error("Failed to load data")
 **Log levels**: DEBUG (blue), INFO (green), WARNING (yellow), ERROR (red)
 
 **Change level**: `get_logger(__name__, level=logging.DEBUG)`
-
-See `src/iceaggr/utils/logger_config.py` for implementation. Original by [Midori Kato](https://github.com/pomidori).
-
-## Benchmarking & Performance Testing
-
-The project distinguishes between two types of performance testing (see [.github/BENCHMARKING.md](.github/BENCHMARKING.md) for detailed guide):
-
-### 1. Performance Regression Tests (`tests/benchmarks/`)
-
-**Purpose**: Ensure performance doesn't degrade over time
-
-**Characteristics**:
-- Run via pytest: `uv run pytest tests/benchmarks/`
-- Assert performance requirements (e.g., "must process >100 events/sec")
-- Part of CI/CD pipeline (future)
-- Fast execution (<5 min total)
-- Named: `test_*.py` or `benchmark_*.py`
-
-**Example**:
-```python
-def test_dataloader_throughput():
-    """Ensure dataloader maintains >100 events/sec."""
-    loader = get_dataloader(batch_size=32)
-    throughput = measure_throughput(loader)
-    assert throughput > 100, f"Throughput {throughput:.1f} events/sec too slow"
-```
-
-### 2. Exploratory Benchmarks (`scripts/`)
-
-**Purpose**: Understand performance characteristics, find bottlenecks, generate reports
-
-**Characteristics**:
-- Standalone scripts: `uv run python scripts/benchmark_*.py`
-- Generate detailed reports, plots, analysis
-- Not part of automated testing
-- Can run for extended periods (hours)
-- Named: `benchmark_*.py`, `analyze_*.py`
-
-**Example**: `scripts/benchmark_dom_packing.py` - Tests extreme events, generates memory reports
-
-### When to Use Which
-
-| Scenario | Location | Run Via |
-|----------|----------|---------|
-| Ensure model forward pass stays fast | `tests/benchmarks/` | `pytest` |
-| Find memory bottleneck in new feature | `scripts/` | Direct execution |
-| CI/CD performance gate | `tests/benchmarks/` | `pytest` |
-| Generate plots for paper/report | `scripts/` | Direct execution |
-| Regression test for data loading | `tests/benchmarks/` | `pytest` |
-| Explore scaling behavior | `scripts/` | Direct execution |
-
-## Development Workflow
-
-1. **Always start with**: `git checkout main && git pull && uv sync`
-2. **Create descriptive branches**: Use prefixes experiment/feature/bugfix/analysis
-3. **Test before committing**: Run `uv run pytest && uv run ruff check .`
-4. **Commit with context**: Explain why, not just what
-5. **Track experiments**: Use W&B for all training runs
-6. **Use logging**: Replace `print()` with `logger.info()` in all code
-
-## Key Technologies
-
-- **PyTorch**: Deep learning framework
-- **PyTorch FlexAttention**: For variable-length sequence handling in transformers
-- **PyTorch Lightning**: Training framework (to be added)
-- **Polars / PyArrow**: Fast dataframe operations for analysis (NOT pandas - too slow!)
-- **UV**: Python package and environment manager
-- **Weights & Biases**: Experiment tracking
-- **Ruff**: Code formatting and linting
 
 ## Data Analysis Best Practices
 
@@ -320,9 +223,47 @@ import pandas as pd  # Don't use this!
 - Polars is 10-100x faster than pandas
 - PyArrow has zero-copy operations
 - IceCube data is large (~20GB) - pandas will be painfully slow
-- Polars has better memory efficiency
 
-**When to use pandas**: Only for small results tables (<1000 rows) or final output formatting
+## Development Workflow
+
+1. **Always start with**: `git checkout main && git pull && uv sync`
+2. **Create descriptive branches**: Use prefixes experiment/feature/bugfix
+3. **Test before committing**: Run `uv run pytest && uv run ruff check .`
+4. **Commit with context**: Explain why, not just what
+5. **Track experiments**: Use W&B for all training runs
+6. **Use logging**: Replace `print()` with `logger.info()` in all code
+
+## Key Technologies
+
+- **PyTorch**: Deep learning framework
+- **PyTorch FlexAttention**: For variable-length sequence handling
+- **Polars / PyArrow**: Fast dataframe operations (NOT pandas!)
+- **UV**: Python package and environment manager
+- **Weights & Biases**: Experiment tracking
+- **Ruff**: Code formatting and linting
+
+## Important Notes
+
+### Input Normalization (CRITICAL!)
+
+**ALWAYS normalize inputs!** This was the cause of a major training failure (NaN after 3 hours).
+
+Raw features (time: 77K, charge: 2.7K, sensor_id: 5.1K) caused gradient explosion.
+
+Normalization is implemented in:
+- `src/iceaggr/models/dom_transformer.py` - pulse features
+- `src/iceaggr/models/event_transformer.py` - geometry
+
+### Scripts Organization
+
+- **scripts/**: Main training script (`train_from_config.py`)
+- **scripts/archive/**: Benchmarks and analysis (useful but not daily use)
+- **scripts/debug/**: One-time debugging scripts (for reference only)
+
+### Notes Organization
+
+- **notes/**: Architecture docs (committed, important)
+- **personal_notes/**: Session notes, TODOs (gitignored)
 
 ## Git Configuration Notes
 
@@ -333,11 +274,3 @@ ssh-keygen -t ed25519 -C "your.email@example.com"
 cat ~/.ssh/id_ed25519.pub  # Add to GitHub Settings → SSH keys
 ssh -T git@github.com      # Test connection
 ```
-
-## Next Development Steps (as per README)
-
-- [ ] Dataloader implementation with DOM grouping
-- [ ] DOM-level transformer (T1) with FlexAttention
-- [ ] Event-level transformer (T2)
-- [ ] End-to-end training pipeline
-- [ ] Comparison with spline-mpe baseline
