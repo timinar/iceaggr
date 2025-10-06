@@ -213,5 +213,8 @@ checkpoints/
 *.png
 *.pdf
 
+# Weights & Biases
+wandb/
+
 # Personal notes and experiments (keep local)
 personal_notes/
