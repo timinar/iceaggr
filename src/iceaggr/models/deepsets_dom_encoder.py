@@ -19,7 +19,7 @@ from iceaggr.utils import get_logger
 
 logger = get_logger(__name__)
 
-
+#TODO consider installing torch_scatter for potentially faster scatter ops
 # Native PyTorch scatter operations (no torch_scatter dependency needed)
 def scatter_mean(src: torch.Tensor, index: torch.Tensor, dim: int, dim_size: int) -> torch.Tensor:
     """Scatter mean: compute mean of src values for each unique index."""
