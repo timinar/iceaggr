@@ -36,31 +36,17 @@ def test_e2e_pipeline():
 
     # Create model
     logger.info("\n2. Creating model...")
-    try:
-        model = HierarchicalIceCubeModel(
-            d_pulse=4,
-            d_dom_embedding=64,  # Smaller for testing
-            dom_latent_dim=64,
-            dom_hidden_dim=128,
-            d_model=128,
-            n_heads=4,
-            n_layers=2,  # Fewer layers for testing
-            dropout=0.1,
-            use_geometry=True  # Try with geometry
-        )
-    except FileNotFoundError:
-        logger.warning("   Geometry file not found, creating model without geometry")
-        model = HierarchicalIceCubeModel(
-            d_pulse=4,
-            d_dom_embedding=64,  # Smaller for testing
-            dom_latent_dim=64,
-            dom_hidden_dim=128,
-            d_model=128,
-            n_heads=4,
-            n_layers=2,  # Fewer layers for testing
-            dropout=0.1,
-            use_geometry=False  # No geometry
-        )
+    model = HierarchicalIceCubeModel(
+        d_pulse=4,
+        d_dom_embedding=64,  # Smaller for testing
+        dom_latent_dim=64,
+        dom_hidden_dim=128,
+        d_model=128,
+        n_heads=4,
+        n_layers=2,  # Fewer layers for testing
+        dropout=0.1,
+        use_geometry=True  # With geometry
+    )
     logger.info(f"   Model created with {sum(p.numel() for p in model.parameters()):,} parameters")
 
     # Test forward pass
