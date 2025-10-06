@@ -230,30 +230,28 @@ class HierarchicalIceCubeModel(nn.Module):
     def compute_loss(
         self,
         predictions: torch.Tensor,
-        targets: torch.Tensor,
-        reduction: str = 'mean'
+        targets: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute angular error loss.
+        Compute angular distance loss (Kaggle IceCube metric).
 
-        Uses mean absolute error on (azimuth, zenith) as a simple baseline.
-        Can be replaced with more sophisticated angular distance metrics.
+        Computes the mean 3D angular separation between predicted and true
+        neutrino directions. This is the official competition metric.
+
+        Random baseline: π/2 ≈ 1.57 radians
 
         Args:
-            predictions: (batch_size, 2) predicted [azimuth, zenith]
-            targets: (batch_size, 2) true [azimuth, zenith]
-            reduction: 'mean', 'sum', or 'none'
+            predictions: (batch_size, 2) predicted [azimuth, zenith] in radians
+            targets: (batch_size, 2) true [azimuth, zenith] in radians
 
         Returns:
-            loss: scalar or (batch_size,) depending on reduction
+            loss: Mean angular distance in radians (scalar)
         """
-        # Simple L1 loss on angles
-        # TODO: Use proper angular distance (great circle distance)
-        loss = torch.abs(predictions - targets).sum(dim=1)  # (batch_size,)
+        from iceaggr.training.losses import angular_dist_score
 
-        if reduction == 'mean':
-            return loss.mean()
-        elif reduction == 'sum':
-            return loss.sum()
-        else:
-            return loss
+        az_pred = predictions[:, 0]
+        zen_pred = predictions[:, 1]
+        az_true = targets[:, 0]
+        zen_true = targets[:, 1]
+
+        return angular_dist_score(az_true, zen_true, az_pred, zen_pred)
