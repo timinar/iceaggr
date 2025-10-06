@@ -1,0 +1,32 @@
+# DeepSets - Quick Test Config
+# Just to verify training loop works
+
+model:
+  d_pulse: 4
+  d_dom_embedding: 64  # Smaller for testing
+  dom_latent_dim: 64
+  dom_hidden_dim: 128
+  d_model: 128
+  n_heads: 4
+  n_layers: 2
+  d_ff: 512
+  dropout: 0.1
+  use_geometry: true
+
+training:
+  max_events: 1000  # Just 1K events for quick test
+  batch_size: 32
+  val_split: 0.1
+  num_workers: 0
+
+  num_epochs: 2
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+
+  checkpoint_dir: experiments/deepsets_baseline/checkpoints_test
+  save_every_n_epochs: 1
+  log_every_n_steps: 10
+  validate_every_n_epochs: 1
+
+  use_wandb: false  # Disable for test

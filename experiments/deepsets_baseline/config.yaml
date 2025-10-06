@@ -1,0 +1,52 @@
+# DeepSets DOM Aggregation Baseline
+# Experiment: deepsets_baseline
+
+model:
+  # DeepSets DOM encoder
+  d_pulse: 4  # time, charge, sensor_id, auxiliary
+  d_dom_embedding: 128
+  dom_latent_dim: 128
+  dom_hidden_dim: 256
+
+  # Event transformer (T2)
+  d_model: 256
+  n_heads: 8
+  n_layers: 6
+  d_ff: 1024
+
+  # Shared
+  dropout: 0.1
+  use_geometry: true
+
+training:
+  # Data
+  max_events: 100000  # Start with 100K for baseline
+  batch_size: 256
+  val_split: 0.1
+  num_workers: 0  # Single process (multiprocessing overhead)
+
+  # Optimization
+  num_epochs: 10
+  learning_rate: 0.0003  # 3e-4
+  weight_decay: 0.0001  # 1e-4
+  grad_clip_norm: 1.0
+  warmup_steps: 1000
+
+  # Checkpointing
+  checkpoint_dir: experiments/deepsets_baseline/checkpoints
+  save_every_n_epochs: 1
+
+  # Logging
+  log_dir: logs/deepsets_baseline
+  log_every_n_steps: 50
+  validate_every_n_epochs: 1
+
+  # W&B
+  use_wandb: true
+  wandb_project: iceaggr
+  wandb_run_name: deepsets-baseline-100k
+  wandb_tags:
+    - deepsets
+    - 100k-events
+    - baseline
+    - dom-aggregation
