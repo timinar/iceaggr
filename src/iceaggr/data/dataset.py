@@ -291,6 +291,91 @@ def collate_with_dom_grouping(
     return result
 
 
+def collate_deepsets(
+    batch: List[Dict[str, torch.Tensor]]
+) -> Dict[str, torch.Tensor]:
+    """
+    Optimized collate function for DeepSets DOM encoder.
+
+    More efficient than collate_with_dom_grouping by using vectorized operations
+    where possible and avoiding redundant sorting.
+
+    Args:
+        batch: List of event dicts from IceCubeDataset
+
+    Returns:
+        Dict with:
+            - pulse_features: (total_pulses, 4) - all pulses flattened
+            - pulse_to_dom_idx: (total_pulses,) - which DOM each pulse belongs to
+            - num_doms: int - total number of unique DOMs in batch
+            - dom_to_event_idx: (num_doms,) - which event each DOM belongs to
+            - dom_ids: (num_doms,) - original sensor IDs for each DOM
+            - event_dom_counts: (batch_size,) - number of DOMs per event
+            - targets: (batch_size, 2) - azimuth, zenith (if available)
+            - event_ids: (batch_size,) - event IDs
+    """
+    batch_size = len(batch)
+
+    # Flatten all pulse features and create event membership
+    pulse_features_list = []
+    pulse_to_event_list = []
+
+    for event_idx, event in enumerate(batch):
+        pulse_features = event['pulse_features']  # (n_pulses, 4)
+        n_pulses = pulse_features.shape[0]
+
+        pulse_features_list.append(pulse_features)
+        pulse_to_event_list.append(torch.full((n_pulses,), event_idx, dtype=torch.long))
+
+    # Concatenate all pulses
+    all_pulse_features = torch.cat(pulse_features_list, dim=0)  # (total_pulses, 4)
+    pulse_to_event = torch.cat(pulse_to_event_list, dim=0)  # (total_pulses,)
+
+    # Extract sensor IDs (column 2)
+    sensor_ids = all_pulse_features[:, 2].long()  # (total_pulses,)
+
+    # Create unique (event, sensor_id) pairs for DOM identification
+    # This is the key optimization: we create a unique DOM ID per event-sensor pair
+    # using a hash: event_id * max_sensor_id + sensor_id
+    max_sensor_id = 5160  # IceCube has 5160 DOMs
+    dom_hash = pulse_to_event * max_sensor_id + sensor_ids  # (total_pulses,)
+
+    # Find unique DOMs and create mapping
+    unique_dom_hashes, inverse_indices = torch.unique(dom_hash, return_inverse=True, sorted=True)
+    pulse_to_dom_idx = inverse_indices  # (total_pulses,) - which DOM each pulse belongs to
+    num_doms = len(unique_dom_hashes)
+
+    # Decode DOM metadata from hashes
+    dom_to_event_idx = unique_dom_hashes // max_sensor_id  # (num_doms,)
+    dom_ids = unique_dom_hashes % max_sensor_id  # (num_doms,)
+
+    # Count DOMs per event
+    event_dom_counts = torch.bincount(dom_to_event_idx, minlength=batch_size)
+
+    # Build result dict
+    result = {
+        # Pulse-level (for DeepSets encoder)
+        'pulse_features': all_pulse_features,  # (total_pulses, 4)
+        'pulse_to_dom_idx': pulse_to_dom_idx,  # (total_pulses,)
+        'num_doms': num_doms,
+
+        # DOM-level metadata (for T2)
+        'dom_to_event_idx': dom_to_event_idx,  # (num_doms,)
+        'dom_ids': dom_ids,  # (num_doms,)
+        'event_dom_counts': event_dom_counts,  # (batch_size,)
+
+        # Event-level
+        'event_ids': torch.stack([b['event_id'] for b in batch]),  # (batch_size,)
+        'batch_size': batch_size
+    }
+
+    # Add targets if available
+    if 'target' in batch[0]:
+        result['targets'] = torch.stack([b['target'] for b in batch])  # (batch_size, 2)
+
+    return result
+
+
 def get_dataloader(
     config_path: Optional[str] = None,
     split: str = "train",
@@ -310,7 +395,7 @@ def get_dataloader(
         shuffle: Whether to shuffle events
         num_workers: Number of worker processes (0 = single process)
         max_events: Optional limit on number of events
-        collate_fn: "variable_length" or "dom_grouping"
+        collate_fn: "variable_length", "dom_grouping", or "deepsets"
 
     Returns:
         DataLoader with continuous batching collate function
@@ -324,8 +409,10 @@ def get_dataloader(
         collate_func = collate_variable_length
     elif collate_fn == "dom_grouping":
         collate_func = collate_with_dom_grouping
+    elif collate_fn == "deepsets":
+        collate_func = collate_deepsets
     else:
-        raise ValueError(f"Unknown collate_fn: {collate_fn}. Use 'variable_length' or 'dom_grouping'")
+        raise ValueError(f"Unknown collate_fn: {collate_fn}. Use 'variable_length', 'dom_grouping', or 'deepsets'")
 
     dataloader = torch.utils.data.DataLoader(
         dataset,
