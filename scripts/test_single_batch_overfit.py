@@ -46,7 +46,7 @@ def test_single_batch_overfit():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     model = HierarchicalIceCubeModel(
-        d_pulse=4,
+        d_pulse=6,  # Changed to 6: [time, charge, x, y, z, auxiliary]
         d_dom_embedding=64,
         dom_latent_dim=64,
         dom_hidden_dim=128,
@@ -85,6 +85,9 @@ def test_single_batch_overfit():
         optimizer.zero_grad()
         loss.backward()
 
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         # Check gradients
         total_grad_norm = 0.0
         for param in model.parameters():
@@ -94,10 +97,15 @@ def test_single_batch_overfit():
 
         optimizer.step()
 
-        # Compute errors for monitoring
+        # Compute errors for monitoring (convert unit vectors back to angles)
         with torch.no_grad():
-            az_pred = predictions[:, 0]
-            zen_pred = predictions[:, 1]
+            from iceaggr.training.losses import unit_vector_to_angles
+
+            # Convert predictions (unit vectors) to angles
+            pred_angles = unit_vector_to_angles(predictions)
+            az_pred = pred_angles[:, 0]
+            zen_pred = pred_angles[:, 1]
+
             az_true = batch['targets'][:, 0]
             zen_true = batch['targets'][:, 1]
 

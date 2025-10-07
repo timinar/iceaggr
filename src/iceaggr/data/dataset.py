@@ -11,14 +11,61 @@ import pyarrow.parquet as pq
 import pyarrow as pa
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from pathlib import Path
 from typing import Dict, Tuple, Optional, List
 import yaml
+import random
+from collections import defaultdict
 
 from iceaggr.utils import get_logger
 
 logger = get_logger(__name__)
+
+
+class BatchAwareSampler(Sampler):
+    """
+    PyTorch Sampler that groups data by batch_id to improve cache efficiency.
+
+    This sampler ensures events from the same parquet file are accessed together,
+    dramatically reducing disk I/O when cache_size < num_batch_files.
+
+    The sampler:
+    1. Groups events by their batch_id (parquet file)
+    2. Shuffles the order of batch files each epoch
+    3. Shuffles events within each batch file
+    4. Yields events file-by-file for sequential access
+
+    With this sampler, set cache_size=1 in IceCubeDataset since only one file
+    is accessed at a time.
+
+    Args:
+        metadata: PyArrow table with 'batch_id' column
+    """
+
+    def __init__(self, metadata):
+        self.n_events = len(metadata)
+        batch_ids = metadata.column("batch_id").to_numpy()
+
+        # Group event indices by their batch_id
+        self.grouped_indices = defaultdict(list)
+        for idx, batch_id in enumerate(batch_ids):
+            self.grouped_indices[batch_id].append(idx)
+
+        self.batch_keys = list(self.grouped_indices.keys())
+
+    def __iter__(self):
+        # 1. Shuffle the order of batch files (epoch-level randomness)
+        random.shuffle(self.batch_keys)
+
+        # 2. For each batch file, shuffle events and yield them
+        for batch_key in self.batch_keys:
+            indices_in_batch = self.grouped_indices[batch_key].copy()
+            random.shuffle(indices_in_batch)
+            yield from indices_in_batch
+
+    def __len__(self):
+        return self.n_events
 
 
 class IceCubeDataset(Dataset):
@@ -292,7 +339,8 @@ def collate_with_dom_grouping(
 
 
 def collate_deepsets(
-    batch: List[Dict[str, torch.Tensor]]
+    batch: List[Dict[str, torch.Tensor]],
+    geometry_table: torch.Tensor | None = None
 ) -> Dict[str, torch.Tensor]:
     """
     Optimized collate function for DeepSets DOM encoder.
@@ -300,12 +348,15 @@ def collate_deepsets(
     More efficient than collate_with_dom_grouping by using vectorized operations
     where possible and avoiding redundant sorting.
 
+    IMPORTANT: Replaces sensor_id with geometry (x, y, z) in pulse features!
+
     Args:
         batch: List of event dicts from IceCubeDataset
+        geometry_table: (5160, 3) tensor of sensor positions, or None to load from config
 
     Returns:
         Dict with:
-            - pulse_features: (total_pulses, 4) - all pulses flattened
+            - pulse_features: (total_pulses, 6) - [time, charge, x, y, z, auxiliary]
             - pulse_to_dom_idx: (total_pulses,) - which DOM each pulse belongs to
             - num_doms: int - total number of unique DOMs in batch
             - dom_to_event_idx: (num_doms,) - which event each DOM belongs to
@@ -316,12 +367,29 @@ def collate_deepsets(
     """
     batch_size = len(batch)
 
+    # Load geometry if not provided
+    if geometry_table is None:
+        from pathlib import Path
+        import yaml
+        config_path = Path(__file__).parent / "data_config.yaml"
+        with open(config_path) as f:
+            config = yaml.safe_load(f)
+        data_root = Path(config["data"]["root"])
+        geometry_path = data_root / "sensor_geometry.csv"
+        import pandas as pd
+        geometry_df = pd.read_csv(geometry_path)
+        if 'sensor_id' in geometry_df.columns:
+            coords = geometry_df[['x', 'y', 'z']].values
+        else:
+            coords = geometry_df.values[:, :3]
+        geometry_table = torch.from_numpy(coords).float()
+
     # Flatten all pulse features and create event membership
     pulse_features_list = []
     pulse_to_event_list = []
 
     for event_idx, event in enumerate(batch):
-        pulse_features = event['pulse_features']  # (n_pulses, 4)
+        pulse_features = event['pulse_features']  # (n_pulses, 4) [time, charge, sensor_id, auxiliary]
         n_pulses = pulse_features.shape[0]
 
         pulse_features_list.append(pulse_features)
@@ -331,8 +399,17 @@ def collate_deepsets(
     all_pulse_features = torch.cat(pulse_features_list, dim=0)  # (total_pulses, 4)
     pulse_to_event = torch.cat(pulse_to_event_list, dim=0)  # (total_pulses,)
 
-    # Extract sensor IDs (column 2)
+    # Extract sensor IDs (column 2) and geometry
     sensor_ids = all_pulse_features[:, 2].long()  # (total_pulses,)
+    pulse_geometry = geometry_table[sensor_ids]  # (total_pulses, 3) - lookup x,y,z
+
+    # Replace sensor_id with geometry in pulse features
+    # Old: [time, charge, sensor_id, auxiliary]
+    # New: [time, charge, x, y, z, auxiliary]
+    time = all_pulse_features[:, 0:1]  # (total_pulses, 1)
+    charge = all_pulse_features[:, 1:2]  # (total_pulses, 1)
+    auxiliary = all_pulse_features[:, 3:4]  # (total_pulses, 1)
+    all_pulse_features = torch.cat([time, charge, pulse_geometry, auxiliary], dim=1)  # (total_pulses, 6)
 
     # Create unique (event, sensor_id) pairs for DOM identification
     # This is the key optimization: we create a unique DOM ID per event-sensor pair
@@ -355,7 +432,7 @@ def collate_deepsets(
     # Build result dict
     result = {
         # Pulse-level (for DeepSets encoder)
-        'pulse_features': all_pulse_features,  # (total_pulses, 4)
+        'pulse_features': all_pulse_features,  # (total_pulses, 6) [time, charge, x, y, z, auxiliary]
         'pulse_to_dom_idx': pulse_to_dom_idx,  # (total_pulses,)
         'num_doms': num_doms,
 
@@ -384,6 +461,8 @@ def get_dataloader(
     num_workers: int = 0,
     max_events: Optional[int] = None,
     collate_fn: str = "variable_length",
+    use_batch_aware_sampler: bool = True,
+    cache_size: Optional[int] = None,
 ) -> torch.utils.data.DataLoader:
     """
     Create a DataLoader for IceCube events.
@@ -392,16 +471,22 @@ def get_dataloader(
         config_path: Path to data_config.yaml (defaults to src/iceaggr/data/data_config.yaml)
         split: 'train' or 'test'
         batch_size: Number of events per batch
-        shuffle: Whether to shuffle events
+        shuffle: Whether to shuffle events (ignored if use_batch_aware_sampler=True)
         num_workers: Number of worker processes (0 = single process)
         max_events: Optional limit on number of events
         collate_fn: "variable_length", "dom_grouping", or "deepsets"
+        use_batch_aware_sampler: If True (default), use BatchAwareSampler for efficient I/O
+        cache_size: Number of batch files to cache. Defaults to 1 if use_batch_aware_sampler=True, else 4
 
     Returns:
         DataLoader with continuous batching collate function
     """
+    # Set optimal cache size based on sampler
+    if cache_size is None:
+        cache_size = 1 if use_batch_aware_sampler else 4
+
     dataset = IceCubeDataset(
-        config_path=config_path, split=split, max_events=max_events
+        config_path=config_path, split=split, max_events=max_events, cache_size=cache_size
     )
 
     # Select collate function
@@ -414,9 +499,19 @@ def get_dataloader(
     else:
         raise ValueError(f"Unknown collate_fn: {collate_fn}. Use 'variable_length', 'dom_grouping', or 'deepsets'")
 
+    # Create sampler for efficient file access
+    if use_batch_aware_sampler:
+        sampler = BatchAwareSampler(dataset.metadata)
+        shuffle = False  # Sampler handles shuffling
+        logger.info(f"Using BatchAwareSampler with cache_size={cache_size}")
+    else:
+        sampler = None
+        logger.info(f"Using random sampling with cache_size={cache_size}")
+
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
+        sampler=sampler,
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=collate_func,

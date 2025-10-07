@@ -3,7 +3,7 @@
 
 model:
   # DeepSets DOM encoder
-  d_pulse: 4  # time, charge, sensor_id, auxiliary
+  d_pulse: 6  # time, charge, x, y, z, auxiliary
   d_dom_embedding: 128
   dom_latent_dim: 128
   dom_hidden_dim: 256

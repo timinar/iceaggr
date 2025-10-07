@@ -49,7 +49,7 @@ class HierarchicalIceCubeModel(nn.Module):
     def __init__(
         self,
         # DOM encoder params
-        d_pulse: int = 4,
+        d_pulse: int = 6,  # [time, charge, x, y, z, auxiliary]
         d_dom_embedding: int = 128,
         dom_latent_dim: int = 128,
         dom_hidden_dim: int = 256,
@@ -142,7 +142,7 @@ class HierarchicalIceCubeModel(nn.Module):
 
         Args:
             batch: Dict with keys:
-                - pulse_features: (total_pulses, 4) RAW pulse features [time, charge, sensor_id, auxiliary]
+                - pulse_features: (total_pulses, 6) RAW [time, charge, x, y, z, auxiliary]
                 - pulse_to_dom_idx: (total_pulses,) which DOM each pulse belongs to
                 - num_doms: int, total number of DOMs in batch
                 - dom_to_event_idx: (num_doms,) which event each DOM belongs to
@@ -150,37 +150,36 @@ class HierarchicalIceCubeModel(nn.Module):
                 - batch_size: int, number of events in batch
 
         Returns:
-            predictions: (batch_size, 2) neutrino directions [azimuth, zenith]
+            predictions: (batch_size, 3) neutrino direction unit vectors [x, y, z]
         """
-        pulse_features = batch['pulse_features']  # (total_pulses, 4) - RAW
+        pulse_features_raw = batch['pulse_features']  # (total_pulses, 6) - RAW
         pulse_to_dom_idx = batch['pulse_to_dom_idx']
         num_doms = batch['num_doms']
         dom_to_event_idx = batch['dom_to_event_idx']
         dom_ids = batch['dom_ids']  # (num_doms,) sensor IDs
         batch_size = batch['batch_size']
 
-        # Normalize pulse features (CRITICAL for training stability!)
-        pulse_features_normalized = self._normalize_pulse_features(pulse_features)
+        # Normalize pulse features for MLP input (but relative encoder will use raw)
+        pulse_features_normalized = self._normalize_pulse_features(pulse_features_raw)
 
         # Stage 1: Encode pulses to DOM embeddings
+        # DeepSets encoder will:
+        # 1. Use RAW time/charge for relative encodings
+        # 2. Use NORMALIZED features for MLP
         dom_embeddings = self.dom_encoder(
             pulse_features=pulse_features_normalized,
             pulse_to_dom_idx=pulse_to_dom_idx,
-            num_doms=num_doms
+            num_doms=num_doms,
+            pulse_features_raw=pulse_features_raw  # Pass raw for relative encoder
         )  # (num_doms, d_dom_embedding)
 
-        # Lookup geometry from sensor IDs
-        geometry = None
-        if self.use_geometry:
-            geometry = self._lookup_geometry(dom_ids)  # (num_doms, 3)
-
         # Stage 2: Aggregate DOM embeddings to predict event direction
+        # Note: Geometry is already encoded in dom_embeddings from T1
         predictions = self.event_transformer(
             dom_embeddings=dom_embeddings,
             dom_to_event_idx=dom_to_event_idx,
-            batch_size=batch_size,
-            geometry=geometry
-        )  # (batch_size, 2)
+            batch_size=batch_size
+        )  # (batch_size, 3) - unit vectors [x, y, z]
 
         return predictions
 
@@ -189,23 +188,27 @@ class HierarchicalIceCubeModel(nn.Module):
         Normalize pulse features using fixed normalization scheme.
 
         Args:
-            pulse_features: (n_pulses, 4) [time, charge, sensor_id, auxiliary]
+            pulse_features: (n_pulses, 6) [time, charge, x, y, z, auxiliary]
 
         Returns:
-            normalized: (n_pulses, 4) normalized features
+            normalized: (n_pulses, 6) normalized features
         """
         time = pulse_features[:, 0]
         charge = pulse_features[:, 1]
-        sensor_id = pulse_features[:, 2]
-        auxiliary = pulse_features[:, 3]
+        x = pulse_features[:, 2]
+        y = pulse_features[:, 3]
+        z = pulse_features[:, 4]
+        auxiliary = pulse_features[:, 5]
 
-        # Fixed normalization (from CLAUDE.md)
+        # Fixed normalization
         time_norm = (time - 1e4) / 3e4
         charge_norm = torch.log10(charge + 1e-8) / 3.0
-        sensor_id_norm = sensor_id / 5160.0
-        auxiliary_norm = auxiliary  # auxiliary is already 0 or 1
+        x_norm = x / 500.0  # Detector scale
+        y_norm = y / 500.0
+        z_norm = z / 500.0
+        auxiliary_norm = auxiliary  # Already 0 or 1
 
-        normalized = torch.stack([time_norm, charge_norm, sensor_id_norm, auxiliary_norm], dim=1)
+        normalized = torch.stack([time_norm, charge_norm, x_norm, y_norm, z_norm, auxiliary_norm], dim=1)
         return normalized
 
     def _lookup_geometry(self, dom_ids: torch.Tensor) -> torch.Tensor:
@@ -236,22 +239,23 @@ class HierarchicalIceCubeModel(nn.Module):
         Compute angular distance loss (Kaggle IceCube metric).
 
         Computes the mean 3D angular separation between predicted and true
-        neutrino directions. This is the official competition metric.
+        neutrino directions using unit vectors.
 
         Random baseline: π/2 ≈ 1.57 radians
 
         Args:
-            predictions: (batch_size, 2) predicted [azimuth, zenith] in radians
-            targets: (batch_size, 2) true [azimuth, zenith] in radians
+            predictions: (batch_size, 3) predicted unit vectors [x, y, z]
+            targets: (batch_size, 2) true angles [azimuth, zenith] in radians
 
         Returns:
             loss: Mean angular distance in radians (scalar)
         """
-        from iceaggr.training.losses import angular_dist_score
+        from iceaggr.training.losses import angular_dist_score_unit_vectors, angles_to_unit_vector
 
-        az_pred = predictions[:, 0]
-        zen_pred = predictions[:, 1]
+        # Convert target angles to unit vectors
         az_true = targets[:, 0]
         zen_true = targets[:, 1]
+        targets_unit_vec = angles_to_unit_vector(az_true, zen_true)
 
-        return angular_dist_score(az_true, zen_true, az_pred, zen_pred)
+        # Compute loss using unit vectors
+        return angular_dist_score_unit_vectors(targets_unit_vec, predictions, epsilon=1e-3)

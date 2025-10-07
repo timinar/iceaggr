@@ -230,7 +230,7 @@ class DeepSetsDOMEncoder(nn.Module):
 
     def __init__(
         self,
-        d_pulse: int = 4,
+        d_pulse: int = 6,  # [time, charge, x, y, z, auxiliary]
         d_relative: int = 6,
         d_latent: int = 128,
         d_output: int = 128,
@@ -278,31 +278,36 @@ class DeepSetsDOMEncoder(nn.Module):
         self,
         pulse_features: torch.Tensor,
         pulse_to_dom_idx: torch.Tensor,
-        num_doms: int
+        num_doms: int,
+        pulse_features_raw: torch.Tensor | None = None
     ) -> torch.Tensor:
         """
         Encode pulses to DOM embeddings using DeepSets.
 
         Args:
-            pulse_features: (n_pulses, d_pulse) pulse features [time, charge, sensor_id, auxiliary]
+            pulse_features: (n_pulses, d_pulse) NORMALIZED pulse features [time, charge, x, y, z, auxiliary]
             pulse_to_dom_idx: (n_pulses,) which DOM each pulse belongs to
             num_doms: Total number of DOMs in batch
+            pulse_features_raw: (n_pulses, d_pulse) RAW pulse features for relative encoding
 
         Returns:
             dom_embeddings: (num_doms, d_output) DOM-level embeddings
         """
         n_pulses = pulse_features.shape[0]
 
-        # Extract time and charge for relative encodings
-        times = pulse_features[:, 0]  # (n_pulses,)
-        charges = pulse_features[:, 1]  # (n_pulses,)
+        # Use raw features for relative encoding if provided, otherwise use normalized
+        features_for_relative = pulse_features_raw if pulse_features_raw is not None else pulse_features
 
-        # Compute relative encodings
+        # Extract RAW time and charge for relative encodings
+        times = features_for_relative[:, 0]  # (n_pulses,)
+        charges = features_for_relative[:, 1]  # (n_pulses,)
+
+        # Compute relative encodings using RAW values
         rel_features = self.relative_encoder(
             times, charges, pulse_to_dom_idx, num_doms
         )  # (n_pulses, d_relative)
 
-        # Concatenate pulse features with relative encodings
+        # Concatenate NORMALIZED pulse features with relative encodings
         pulse_with_rel = torch.cat([pulse_features, rel_features], dim=1)  # (n_pulses, d_pulse + d_relative)
 
         # Encode pulses to latent space
@@ -315,11 +320,12 @@ class DeepSetsDOMEncoder(nn.Module):
         # 2. Max pooling
         max_pool = scatter_max(encoded, pulse_to_dom_idx, dim=0, dim_size=num_doms)[0]  # (num_doms, d_latent)
 
-        # 3. Charge-weighted pooling
-        charges_expanded = charges.unsqueeze(1)  # (n_pulses, 1)
+        # 3. Charge-weighted pooling (use RAW charges)
+        charges_for_weighting = charges if pulse_features_raw is not None else features_for_relative[:, 1]
+        charges_expanded = charges_for_weighting.unsqueeze(1)  # (n_pulses, 1)
         weighted_encoded = encoded * charges_expanded  # (n_pulses, d_latent)
         weighted_sum = scatter_add(weighted_encoded, pulse_to_dom_idx, dim=0, dim_size=num_doms)  # (num_doms, d_latent)
-        charge_sum = scatter_add(charges, pulse_to_dom_idx, dim=0, dim_size=num_doms).unsqueeze(1)  # (num_doms, 1)
+        charge_sum = scatter_add(charges_for_weighting, pulse_to_dom_idx, dim=0, dim_size=num_doms).unsqueeze(1)  # (num_doms, 1)
         charge_pool = weighted_sum / (charge_sum + 1e-8)  # (num_doms, d_latent)
 
         # Concatenate pooling heads
