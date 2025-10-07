@@ -11,14 +11,61 @@ import pyarrow.parquet as pq
 import pyarrow as pa
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from pathlib import Path
 from typing import Dict, Tuple, Optional, List
 import yaml
+import random
+from collections import defaultdict
 
 from iceaggr.utils import get_logger
 
 logger = get_logger(__name__)
+
+
+class BatchAwareSampler(Sampler):
+    """
+    PyTorch Sampler that groups data by batch_id to improve cache efficiency.
+
+    This sampler ensures events from the same parquet file are accessed together,
+    dramatically reducing disk I/O when cache_size < num_batch_files.
+
+    The sampler:
+    1. Groups events by their batch_id (parquet file)
+    2. Shuffles the order of batch files each epoch
+    3. Shuffles events within each batch file
+    4. Yields events file-by-file for sequential access
+
+    With this sampler, set cache_size=1 in IceCubeDataset since only one file
+    is accessed at a time.
+
+    Args:
+        metadata: PyArrow table with 'batch_id' column
+    """
+
+    def __init__(self, metadata):
+        self.n_events = len(metadata)
+        batch_ids = metadata.column("batch_id").to_numpy()
+
+        # Group event indices by their batch_id
+        self.grouped_indices = defaultdict(list)
+        for idx, batch_id in enumerate(batch_ids):
+            self.grouped_indices[batch_id].append(idx)
+
+        self.batch_keys = list(self.grouped_indices.keys())
+
+    def __iter__(self):
+        # 1. Shuffle the order of batch files (epoch-level randomness)
+        random.shuffle(self.batch_keys)
+
+        # 2. For each batch file, shuffle events and yield them
+        for batch_key in self.batch_keys:
+            indices_in_batch = self.grouped_indices[batch_key].copy()
+            random.shuffle(indices_in_batch)
+            yield from indices_in_batch
+
+    def __len__(self):
+        return self.n_events
 
 
 class IceCubeDataset(Dataset):
@@ -299,6 +346,8 @@ def get_dataloader(
     num_workers: int = 0,
     max_events: Optional[int] = None,
     collate_fn: str = "variable_length",
+    use_batch_aware_sampler: bool = True,
+    cache_size: Optional[int] = None,
 ) -> torch.utils.data.DataLoader:
     """
     Create a DataLoader for IceCube events.
@@ -307,16 +356,22 @@ def get_dataloader(
         config_path: Path to data_config.yaml (defaults to src/iceaggr/data/data_config.yaml)
         split: 'train' or 'test'
         batch_size: Number of events per batch
-        shuffle: Whether to shuffle events
+        shuffle: Whether to shuffle events (ignored if use_batch_aware_sampler=True)
         num_workers: Number of worker processes (0 = single process)
         max_events: Optional limit on number of events
         collate_fn: "variable_length" or "dom_grouping"
+        use_batch_aware_sampler: If True (default), use BatchAwareSampler for efficient I/O
+        cache_size: Number of batch files to cache. Defaults to 1 if use_batch_aware_sampler=True, else 4
 
     Returns:
         DataLoader with continuous batching collate function
     """
+    # Set optimal cache size based on sampler
+    if cache_size is None:
+        cache_size = 1 if use_batch_aware_sampler else 4
+
     dataset = IceCubeDataset(
-        config_path=config_path, split=split, max_events=max_events
+        config_path=config_path, split=split, max_events=max_events, cache_size=cache_size
     )
 
     # Select collate function
@@ -327,9 +382,19 @@ def get_dataloader(
     else:
         raise ValueError(f"Unknown collate_fn: {collate_fn}. Use 'variable_length' or 'dom_grouping'")
 
+    # Create sampler for efficient file access
+    if use_batch_aware_sampler:
+        sampler = BatchAwareSampler(dataset.metadata)
+        shuffle = False  # Sampler handles shuffling
+        logger.info(f"Using BatchAwareSampler with cache_size={cache_size}")
+    else:
+        sampler = None
+        logger.info(f"Using random sampling with cache_size={cache_size}")
+
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
+        sampler=sampler,
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=collate_func,
