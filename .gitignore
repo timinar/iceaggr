@@ -215,3 +215,6 @@ checkpoints/
 
 # Personal notes and experiments (keep local)
 personal_notes/
+
+# Weights & Biases
+wandb/
