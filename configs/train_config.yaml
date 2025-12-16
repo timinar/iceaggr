@@ -1,0 +1,63 @@
+# Training configuration for hierarchical DOM model
+#
+# Usage:
+#   CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_simple.py --config configs/train_config.yaml
+#   CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_simple.py --config configs/train_config.yaml --lr 1e-3
+
+# Model architecture
+model:
+  embed_dim: 64              # Embedding dimension throughout the model
+  max_doms: 128              # Maximum DOMs per event (rest are subsampled)
+  pulse_hidden_dim: 64       # Hidden dimension in pulse embedder MLP
+
+  # DOM encoder
+  dom_encoder_type: pooling  # "pooling" or "transformer"
+  pool_method: mean          # "mean", "max", "mean_max", or "first"
+
+  # Event transformer
+  event_num_heads: 4         # Number of attention heads
+  event_num_layers: 2        # Number of transformer layers
+  event_hidden_dim: 256      # FFN hidden dimension
+
+  # Direction head
+  head_hidden_dim: 128       # Hidden dimension in directional head
+
+  # Regularization
+  dropout: 0.1
+
+# Training parameters
+training:
+  epochs: 10
+  batch_size: 4096           # Large batch for better GPU utilization
+  lr: 1e-3                   # Learning rate (use 1e-3 for large batches)
+  weight_decay: 0.01
+  gradient_clip: 1.0
+
+  # Learning rate schedule
+  scheduler: cosine          # "cosine" or "onecycle"
+  min_lr_ratio: 0.01         # Min LR = lr * min_lr_ratio
+
+  # Mixed precision
+  use_amp: true              # Use automatic mixed precision
+
+# Data
+data:
+  max_events: 800000         # Number of training events
+  val_events: 50000          # Number of validation events
+  num_workers: 4
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+
+# Logging
+wandb:
+  enabled: true
+  project: iceaggr
+  name: null                 # Auto-generated if null
+  tags:
+    - hierarchical-dom
+    - baseline
+
+# Checkpointing
+checkpoint:
+  dir: checkpoints
+  save_every: 10             # Save checkpoint every N epochs
+  resume: null               # Path to checkpoint to resume from

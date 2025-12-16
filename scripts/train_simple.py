@@ -4,45 +4,30 @@ Training script for hierarchical DOM model.
 
 QUICK START
 -----------
-# Basic training (50k events, 10 epochs)
-CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_simple.py
+# Train with config
+CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_simple.py --config configs/train_config.yaml
 
-# Full training (800k events, recommended)
-CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_simple.py --epochs 10 --max-events 800000 --batch-size 4096
+# Override config params via CLI
+CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_simple.py --config configs/train_config.yaml --lr 1e-3 --epochs 20
 
-# Run in background with screen
-screen -dmS train bash -c 'CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_simple.py --epochs 10 --max-events 800000 --batch-size 4096 2>&1 | tee training_output.log'
-
-# Monitor training
-tail -f training_output.log
-
-ARGUMENTS
----------
---epochs       Number of epochs (default: 50)
---max-events   Number of training events (default: 50000, use 800000 for full training)
---batch-size   Batch size (default: 256, use 4096 for faster training)
---lr           Learning rate (default: 3e-4, use 1e-3 for large batches)
---pool-method  DOM pooling method: mean, max, mean_max (default: mean)
---checkpoint   Resume from checkpoint path
+# Run in background
+screen -dmS train bash -c 'CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_simple.py --config configs/train_config.yaml 2>&1 | tee training_output.log'
 
 EXPECTED RESULTS
 ----------------
-- Random baseline: ~90° angular error
-- After 2 epochs (800k events): ~70°
-- After 10 epochs: ~50-60° (target)
-- Loss is in radians: 1.22 rad = 70°, 1.05 rad = 60°
-
-CHECKPOINTS
------------
-Saved to checkpoints/best_model.pt (best validation loss)
+- Random baseline: ~90° angular error (1.57 rad)
+- After 2 epochs (800k events): ~70° (1.22 rad)
+- After 10 epochs: ~50-60° (0.87-1.05 rad)
 """
 
 import argparse
 import time
+from datetime import datetime
 from pathlib import Path
 
 import torch
 import torch.nn as nn
+import yaml
 from torch.utils.data import DataLoader
 
 from iceaggr.data import (
@@ -57,46 +42,91 @@ from iceaggr.utils import get_logger
 logger = get_logger(__name__)
 
 
+def load_config(config_path: str) -> dict:
+    """Load configuration from YAML file."""
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=50, help="Number of epochs")
-    parser.add_argument("--max-events", type=int, default=50000, help="Max training events")
-    parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
-    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--device", type=str, default="cuda", help="Device")
-    parser.add_argument("--pool-method", type=str, default="mean", help="DOM pooling method")
-    parser.add_argument("--checkpoint", type=str, default=None, help="Resume from checkpoint")
+    parser.add_argument("--config", type=str, default="configs/train_config.yaml", help="Config file path")
+
+    # CLI overrides for common parameters
+    parser.add_argument("--epochs", type=int, default=None, help="Override epochs")
+    parser.add_argument("--max-events", type=int, default=None, help="Override max training events")
+    parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
+    parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
+    parser.add_argument("--pool-method", type=str, default=None, help="Override pool method")
+    parser.add_argument("--checkpoint", type=str, default=None, help="Override checkpoint to resume")
+    parser.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
+    parser.add_argument("--name", type=str, default=None, help="Run name for wandb")
+
     return parser.parse_args()
 
 
+def apply_cli_overrides(config: dict, args) -> dict:
+    """Apply CLI argument overrides to config."""
+    if args.epochs is not None:
+        config['training']['epochs'] = args.epochs
+    if args.max_events is not None:
+        config['data']['max_events'] = args.max_events
+    if args.batch_size is not None:
+        config['training']['batch_size'] = args.batch_size
+    if args.lr is not None:
+        config['training']['lr'] = args.lr
+    if args.pool_method is not None:
+        config['model']['pool_method'] = args.pool_method
+    if args.checkpoint is not None:
+        config['checkpoint']['resume'] = args.checkpoint
+    if args.no_wandb:
+        config['wandb']['enabled'] = False
+    if args.name is not None:
+        config['wandb']['name'] = args.name
+    return config
+
+
 def create_model(config: dict, device: str) -> nn.Module:
-    """Create the hierarchical model."""
-    model = HierarchicalDOMModel(config)
+    """Create the hierarchical model from config."""
+    model_config = {
+        "embed_dim": config['model']['embed_dim'],
+        "max_doms": config['model']['max_doms'],
+        "dom_encoder_type": config['model']['dom_encoder_type'],
+        "pool_method": config['model']['pool_method'],
+        "event_num_heads": config['model']['event_num_heads'],
+        "event_num_layers": config['model']['event_num_layers'],
+        "event_hidden_dim": config['model']['event_hidden_dim'],
+        "head_hidden_dim": config['model']['head_hidden_dim'],
+        "dropout": config['model']['dropout'],
+    }
+
+    model = HierarchicalDOMModel(model_config)
     model = model.to(device)
 
-    # Count parameters
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Model parameters: {n_params:,}")
 
     return model
 
 
-def create_dataloader(max_events: int, batch_size: int, geometry: GeometryLoader) -> DataLoader:
-    """Create training dataloader with BatchAwareSampler."""
+def create_dataloader(config: dict, geometry: GeometryLoader, split: str = 'train') -> DataLoader:
+    """Create dataloader from config."""
+    max_events = config['data']['max_events'] if split == 'train' else config['data'].get('val_events', 50000)
+
     dataset = IceCubeDataset(
-        split='train',
+        split=split,
         max_events=max_events,
         cache_size=1,
     )
 
-    sampler = BatchAwareSampler(dataset.metadata)  # Already shuffles internally
+    sampler = BatchAwareSampler(dataset.metadata)
     collate_fn = make_collate_with_geometry(geometry)
 
     loader = DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=config['training']['batch_size'],
         sampler=sampler,
-        num_workers=4,
+        num_workers=config['data']['num_workers'],
         collate_fn=collate_fn,
         pin_memory=True,
     )
@@ -119,6 +149,8 @@ def train_epoch(
     scaler: torch.amp.GradScaler,
     device: str,
     epoch: int,
+    config: dict,
+    wandb_run=None,
 ) -> float:
     """Train for one epoch."""
     model.train()
@@ -133,18 +165,26 @@ def train_epoch(
         optimizer.zero_grad()
 
         # Forward with AMP
-        with torch.autocast(device_type='cuda', dtype=torch.float16):
+        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=config['training']['use_amp']):
             y_pred = model(batch)
             loss = angular_distance_loss(y_pred, batch['targets'])
 
         # Backward with gradient scaling
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config['training']['gradient_clip'])
         scaler.step(optimizer)
         scaler.update()
 
         total_loss += loss.item()
+
+        # Log to wandb
+        if wandb_run is not None and (batch_idx + 1) % 25 == 0:
+            step = (epoch - 1) * n_batches + batch_idx
+            wandb_run.log({
+                "train/loss": loss.item(),
+                "train/loss_deg": torch.rad2deg(torch.tensor(loss.item())).item(),
+            }, step=step)
 
         # Progress every 25 batches
         if (batch_idx + 1) % 25 == 0:
@@ -160,7 +200,7 @@ def train_epoch(
     return total_loss / n_batches
 
 
-def validate(model: nn.Module, loader: DataLoader, device: str) -> float:
+def validate(model: nn.Module, loader: DataLoader, device: str, config: dict) -> float:
     """Validate on a subset of data."""
     model.eval()
 
@@ -174,7 +214,7 @@ def validate(model: nn.Module, loader: DataLoader, device: str) -> float:
 
             batch = move_batch_to_device(batch, device)
 
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
+            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=config['training']['use_amp']):
                 y_pred = model(batch)
                 loss = angular_distance_loss(y_pred, batch['targets'])
 
@@ -187,72 +227,82 @@ def validate(model: nn.Module, loader: DataLoader, device: str) -> float:
 def main():
     args = parse_args()
 
-    device = args.device if torch.cuda.is_available() else "cpu"
+    # Load and merge config
+    config = load_config(args.config)
+    config = apply_cli_overrides(config, args)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}")
 
-    # Model configuration
-    model_config = {
-        "embed_dim": 64,
-        "max_doms": 128,
-        "pulse_hidden_dims": [64, 64],
-        "dom_encoder_type": "pooling",
-        "pool_method": args.pool_method,
-        "event_num_heads": 4,
-        "event_num_layers": 2,
-        "event_hidden_dim": 256,
-        "head_hidden_dim": 128,
-        "dropout": 0.1,
-    }
+    # Initialize wandb
+    wandb_run = None
+    if config['wandb']['enabled']:
+        try:
+            import wandb
+            run_name = config['wandb']['name'] or f"train-{datetime.now().strftime('%m%d-%H%M')}"
+            wandb_run = wandb.init(
+                project=config['wandb']['project'],
+                name=run_name,
+                config=config,
+                tags=config['wandb'].get('tags', []),
+            )
+            logger.info(f"W&B run: {wandb_run.url}")
+        except ImportError:
+            logger.warning("wandb not installed, skipping logging")
+        except Exception as e:
+            logger.warning(f"Failed to init wandb: {e}")
 
     # Load geometry
-    geometry = GeometryLoader('/groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv')
+    geometry = GeometryLoader(config['data']['geometry_path'])
     logger.info(f"Loaded geometry: {geometry}")
 
     # Create model
-    model = create_model(model_config, device)
+    model = create_model(config, device)
 
     # Create dataloader
-    loader = create_dataloader(args.max_events, args.batch_size, geometry)
-    logger.info(f"Training: {args.max_events:,} events, {len(loader):,} batches, bs={args.batch_size}")
+    loader = create_dataloader(config, geometry)
+    logger.info(f"Training: {config['data']['max_events']:,} events, {len(loader):,} batches, bs={config['training']['batch_size']}")
 
-    # Optimizer with cosine annealing
+    # Optimizer
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=args.lr,
-        weight_decay=0.01,
+        lr=float(config['training']['lr']),
+        weight_decay=float(config['training']['weight_decay']),
     )
 
-    # Cosine annealing LR scheduler
+    # LR scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=args.epochs,
-        eta_min=args.lr / 100,  # Min LR is 1% of initial
+        T_max=config['training']['epochs'],
+        eta_min=float(config['training']['lr']) * float(config['training']['min_lr_ratio']),
     )
 
     # AMP scaler
-    scaler = torch.amp.GradScaler()
+    scaler = torch.amp.GradScaler(enabled=config['training']['use_amp'])
 
     # Resume from checkpoint if provided
     start_epoch = 1
-    if args.checkpoint and Path(args.checkpoint).exists():
-        checkpoint = torch.load(args.checkpoint)
+    best_loss = float('inf')
+    resume_path = config['checkpoint'].get('resume')
+    if resume_path and Path(resume_path).exists():
+        checkpoint = torch.load(resume_path)
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
         start_epoch = checkpoint['epoch'] + 1
+        best_loss = checkpoint.get('val_loss', float('inf'))
         logger.info(f"Resumed from epoch {start_epoch-1}")
 
     # Training loop
-    best_loss = float('inf')
-    logger.info(f"Starting training for {args.epochs} epochs...")
-    logger.info(f"LR: {args.lr}, Pool: {args.pool_method}")
+    logger.info(f"Starting training for {config['training']['epochs']} epochs...")
+    logger.info(f"LR: {config['training']['lr']}, Pool: {config['model']['pool_method']}")
 
-    for epoch in range(start_epoch, args.epochs + 1):
+    for epoch in range(start_epoch, config['training']['epochs'] + 1):
         # Train
-        train_loss = train_epoch(model, loader, optimizer, scaler, device, epoch)
+        train_loss = train_epoch(model, loader, optimizer, scaler, device, epoch, config, wandb_run)
 
-        # Validate (quick validation on 20 batches)
-        val_loss = validate(model, loader, device)
+        # Validate
+        val_loss = validate(model, loader, device, config)
 
         # Step scheduler
         scheduler.step()
@@ -269,11 +319,24 @@ def main():
             f"LR: {current_lr:.2e}"
         )
 
+        # Log to wandb
+        if wandb_run is not None:
+            wandb_run.log({
+                "epoch": epoch,
+                "train/epoch_loss": train_loss,
+                "train/epoch_loss_deg": train_deg,
+                "val/loss": val_loss,
+                "val/loss_deg": val_deg,
+                "lr": current_lr,
+            })
+
         # Save checkpoint if best
+        checkpoint_dir = Path(config['checkpoint']['dir'])
+        checkpoint_dir.mkdir(exist_ok=True)
+
         if val_loss < best_loss:
             best_loss = val_loss
-            checkpoint_path = Path("checkpoints/best_model.pt")
-            checkpoint_path.parent.mkdir(exist_ok=True)
+            checkpoint_path = checkpoint_dir / "best_model.pt"
             torch.save({
                 'epoch': epoch,
                 'model': model.state_dict(),
@@ -281,13 +344,14 @@ def main():
                 'scheduler': scheduler.state_dict(),
                 'train_loss': train_loss,
                 'val_loss': val_loss,
+                'config': config,
             }, checkpoint_path)
             logger.info(f"Saved best model (val_loss: {val_deg:.1f} deg)")
 
-        # Save latest checkpoint every 10 epochs
-        if epoch % 10 == 0:
-            latest_path = Path(f"checkpoints/epoch_{epoch:03d}.pt")
-            latest_path.parent.mkdir(exist_ok=True)
+        # Save periodic checkpoint
+        save_every = config['checkpoint'].get('save_every', 10)
+        if epoch % save_every == 0:
+            latest_path = checkpoint_dir / f"epoch_{epoch:03d}.pt"
             torch.save({
                 'epoch': epoch,
                 'model': model.state_dict(),
@@ -295,9 +359,13 @@ def main():
                 'scheduler': scheduler.state_dict(),
                 'train_loss': train_loss,
                 'val_loss': val_loss,
+                'config': config,
             }, latest_path)
 
     logger.info(f"Training complete. Best val loss: {torch.rad2deg(torch.tensor(best_loss)):.1f} deg")
+
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":
