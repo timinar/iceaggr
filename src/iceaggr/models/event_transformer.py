@@ -124,10 +124,6 @@ class EventTransformer(nn.Module):
         # CLS token for event-level aggregation
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
 
-        # Learnable positional encoding
-        # +1 for CLS token position
-        self.pos_encoding = nn.Parameter(torch.randn(1, max_doms + 1, embed_dim))
-
         # Geometry integration: project (x,y,z) to embedding space
         self.geometry_proj = nn.Linear(3, embed_dim)
 
@@ -144,9 +140,8 @@ class EventTransformer(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        """Initialize positional encoding and CLS token."""
+        """Initialize CLS token."""
         nn.init.normal_(self.cls_token, std=0.02)
-        nn.init.normal_(self.pos_encoding, std=0.02)
 
     def forward(
         self,
@@ -179,10 +174,6 @@ class EventTransformer(nn.Module):
         # Update padding mask for CLS (always valid)
         cls_mask = torch.ones(batch_size, 1, dtype=torch.bool, device=device)
         full_mask = torch.cat([cls_mask, padding_mask], dim=1)
-
-        # Add positional encoding
-        seq_len = x.shape[1]
-        x = x + self.pos_encoding[:, :seq_len, :]
 
         # Apply transformer blocks
         for block in self.transformer_blocks:

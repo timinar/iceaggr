@@ -12,7 +12,7 @@ from typing import List, Optional
 
 class PulseEmbedder(nn.Module):
     """
-    MLP to embed raw pulse features into embedding space.
+    Simple MLP to embed raw pulse features into embedding space.
 
     Input features (8 dimensions):
         - time: normalized timestamp
@@ -25,8 +25,7 @@ class PulseEmbedder(nn.Module):
     Args:
         input_dim: Number of input features (default: 8)
         embed_dim: Output embedding dimension (default: 64)
-        hidden_dims: List of hidden layer dimensions (default: [64, 64])
-        dropout: Dropout rate (default: 0.1)
+        hidden_dim: Hidden layer dimension (default: 64)
 
     Example:
         >>> embedder = PulseEmbedder(input_dim=8, embed_dim=64)
@@ -38,34 +37,21 @@ class PulseEmbedder(nn.Module):
         self,
         input_dim: int = 8,
         embed_dim: int = 64,
-        hidden_dims: Optional[List[int]] = None,
-        dropout: float = 0.1,
+        hidden_dim: int = 64,
+        hidden_dims: Optional[List[int]] = None,  # kept for backward compat, ignored
+        dropout: float = 0.1,  # kept for backward compat, ignored
     ):
         super().__init__()
-
-        if hidden_dims is None:
-            hidden_dims = [64, 64]
 
         self.input_dim = input_dim
         self.embed_dim = embed_dim
 
-        # Build MLP layers
-        layers = []
-        prev_dim = input_dim
-
-        for hidden_dim in hidden_dims:
-            layers.extend([
-                nn.Linear(prev_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.GELU(),
-                nn.Dropout(dropout),
-            ])
-            prev_dim = hidden_dim
-
-        # Final projection to embed_dim
-        layers.append(nn.Linear(prev_dim, embed_dim))
-
-        self.mlp = nn.Sequential(*layers)
+        # Simple MLP: input -> hidden -> output (no LayerNorm, no Dropout)
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, embed_dim),
+        )
 
     def forward(self, pulse_features: torch.Tensor) -> torch.Tensor:
         """

@@ -36,8 +36,12 @@ class DirectionalHead(nn.Module):
         super().__init__()
 
         self.fc1 = nn.Linear(embed_dim, hidden_dim)
-        self.activation = nn.ReLU()
+        self.activation = nn.GELU()  # GELU instead of ReLU to avoid dead neurons
         self.fc2 = nn.Linear(hidden_dim, 3)
+
+        # Initialize fc2 with small weights to encourage diverse initial predictions
+        nn.init.normal_(self.fc2.weight, std=0.01)
+        nn.init.zeros_(self.fc2.bias)
 
     def forward(self, event_embedding: torch.Tensor) -> torch.Tensor:
         """

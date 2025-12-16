@@ -2,7 +2,7 @@
 
 from .losses import (
     angular_distance_loss,
-    angular_distance_from_unit_vectors,
+    angular_dist_score_unit_vectors,
     angles_to_unit_vector,
     unit_vector_to_angles,
     AngularDistanceLoss,
@@ -16,7 +16,7 @@ from .hierarchical_model import HierarchicalDOMModel, count_parameters
 __all__ = [
     # Losses
     "angular_distance_loss",
-    "angular_distance_from_unit_vectors",
+    "angular_dist_score_unit_vectors",
     "angles_to_unit_vector",
     "unit_vector_to_angles",
     "AngularDistanceLoss",
