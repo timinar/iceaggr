@@ -1,13 +1,40 @@
 #!/usr/bin/env python3
 """
-Simple multi-epoch training script for hierarchical DOM model.
+Training script for hierarchical DOM model.
 
-This script uses a simple training loop (no Lightning) for easier debugging.
-It runs multiple epochs and tracks progress clearly.
+QUICK START
+-----------
+# Basic training (50k events, 10 epochs)
+CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_simple.py
 
-Usage:
-    CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_simple.py
-    CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_simple.py --epochs 50 --max-events 50000
+# Full training (800k events, recommended)
+CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_simple.py --epochs 10 --max-events 800000 --batch-size 4096
+
+# Run in background with screen
+screen -dmS train bash -c 'CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_simple.py --epochs 10 --max-events 800000 --batch-size 4096 2>&1 | tee training_output.log'
+
+# Monitor training
+tail -f training_output.log
+
+ARGUMENTS
+---------
+--epochs       Number of epochs (default: 50)
+--max-events   Number of training events (default: 50000, use 800000 for full training)
+--batch-size   Batch size (default: 256, use 4096 for faster training)
+--lr           Learning rate (default: 3e-4, use 1e-3 for large batches)
+--pool-method  DOM pooling method: mean, max, mean_max (default: mean)
+--checkpoint   Resume from checkpoint path
+
+EXPECTED RESULTS
+----------------
+- Random baseline: ~90° angular error
+- After 2 epochs (800k events): ~70°
+- After 10 epochs: ~50-60° (target)
+- Loss is in radians: 1.22 rad = 70°, 1.05 rad = 60°
+
+CHECKPOINTS
+-----------
+Saved to checkpoints/best_model.pt (best validation loss)
 """
 
 import argparse
