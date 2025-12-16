@@ -1,71 +1,26 @@
 """
 IceCube Dataset with PyArrow backend for efficient variable-length event loading.
 
-This module implements Phase 1 of the data loading strategy:
-- Simple batch caching
-- Full event loading (no subsampling)
-- Variable-length collation
+This module provides:
+- IceCubeDataset: Full event loading (no subsampling)
+- IceCubeSubsampledDataset: Bucketed subsampled loading (future)
+- get_dataloader: Convenience function for creating dataloaders
 """
 
 import pyarrow.parquet as pq
 import pyarrow as pa
 import numpy as np
 import torch
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset
 from pathlib import Path
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Optional
 import yaml
-import random
-from collections import defaultdict
 
 from iceaggr.utils import get_logger
+from .samplers import BatchAwareSampler, BucketBatchSampler
+from .collators import collate_variable_length, collate_with_dom_grouping, collate_padded_subsampled
 
 logger = get_logger(__name__)
-
-
-class BatchAwareSampler(Sampler):
-    """
-    PyTorch Sampler that groups data by batch_id to improve cache efficiency.
-
-    This sampler ensures events from the same parquet file are accessed together,
-    dramatically reducing disk I/O when cache_size < num_batch_files.
-
-    The sampler:
-    1. Groups events by their batch_id (parquet file)
-    2. Shuffles the order of batch files each epoch
-    3. Shuffles events within each batch file
-    4. Yields events file-by-file for sequential access
-
-    With this sampler, set cache_size=1 in IceCubeDataset since only one file
-    is accessed at a time.
-
-    Args:
-        metadata: PyArrow table with 'batch_id' column
-    """
-
-    def __init__(self, metadata):
-        self.n_events = len(metadata)
-        batch_ids = metadata.column("batch_id").to_numpy()
-
-        # Group event indices by their batch_id
-        self.grouped_indices = defaultdict(list)
-        for idx, batch_id in enumerate(batch_ids):
-            self.grouped_indices[batch_id].append(idx)
-
-        self.batch_keys = list(self.grouped_indices.keys())
-
-    def __iter__(self):
-        # 1. Shuffle the order of batch files (epoch-level randomness)
-        random.shuffle(self.batch_keys)
-
-        # 2. For each batch file, shuffle events and yield them
-        for batch_key in self.batch_keys:
-            indices_in_batch = self.grouped_indices[batch_key].copy()
-            random.shuffle(indices_in_batch)
-            yield from indices_in_batch
-
-    def __len__(self):
-        return self.n_events
 
 
 class IceCubeDataset(Dataset):
@@ -199,143 +154,148 @@ class IceCubeDataset(Dataset):
         return result
 
 
-def collate_variable_length(
-    batch: List[Dict[str, torch.Tensor]]
-) -> Dict[str, torch.Tensor]:
+class IceCubeSubsampledDataset(Dataset):
     """
-    Collate function for variable-length events using continuous batching.
+    PyTorch Dataset for IceCube events with uniform random subsampling.
 
-    Instead of padding to max length, we flatten all pulses and track which
-    event each pulse belongs to. This is memory-efficient for the hierarchical
-    transformer architecture.
+    This dataset loads events from a metadata file that includes bucket assignments.
+    Events exceeding max_seq_len are uniformly subsampled.
 
     Args:
-        batch: List of event dicts from IceCubeDataset
+        metadata_path: Path to event_metadata.parquet (with bucket_id column)
+        data_root: Root directory containing batch files
+        split: 'train' or 'test' (determines subdirectory)
+        max_seq_len: Maximum sequence length (events exceeding this are subsampled)
+        max_events: Optional limit on number of events (for testing)
+        cache_size: Number of batch files to keep in LRU cache (default: 1)
 
     Returns:
-        Dict with:
-            - pulse_features: (total_pulses, 4) - all pulses flattened
-            - pulse_to_event_idx: (total_pulses,) - which event each pulse belongs to
-            - event_lengths: (batch_size,) - number of pulses per event
-            - targets: (batch_size, 2) - azimuth, zenith (if available)
-            - event_ids: (batch_size,) - event IDs
+        Dict with keys:
+            - 'pulse_features': (n_pulses, 4) array [time, charge, sensor_id, auxiliary]
+            - 'target': (2,) array [azimuth, zenith] (if split=='train')
+            - 'event_id': int
+            - 'n_pulses': int
+            - 'bucket_id': int
     """
-    batch_size = len(batch)
 
-    # Collect all pulses from all events
-    pulse_features_list = [item["pulse_features"] for item in batch]
-    event_lengths = torch.tensor([item["n_pulses"].item() for item in batch], dtype=torch.long)
+    def __init__(
+        self,
+        metadata_path: str,
+        data_root: str,
+        split: str = "train",
+        max_seq_len: int = 512,
+        max_events: Optional[int] = None,
+        cache_size: int = 1,
+    ):
+        assert split in ["train", "test"], f"split must be 'train' or 'test', got {split}"
 
-    # Flatten all pulses
-    pulse_features = torch.cat(pulse_features_list, dim=0)  # (total_pulses, 4)
+        self.data_root = Path(data_root)
+        self.split = split
+        self.max_seq_len = max_seq_len
 
-    # Create pulse-to-event mapping
-    pulse_to_event_idx = torch.repeat_interleave(
-        torch.arange(batch_size, dtype=torch.long), event_lengths
-    )
+        # Load event metadata (includes bucket_id)
+        logger.info(f"Loading event metadata from {metadata_path}...")
+        self.metadata = pq.read_table(metadata_path)
 
-    # Collate other fields
-    result = {
-        "pulse_features": pulse_features,
-        "pulse_to_event_idx": pulse_to_event_idx,
-        "event_lengths": event_lengths,
-        "event_ids": torch.stack([item["event_id"] for item in batch]),
-    }
+        if max_events is not None:
+            self.metadata = self.metadata.slice(0, max_events)
 
-    # Add targets if available
-    if "target" in batch[0]:
-        result["targets"] = torch.stack([item["target"] for item in batch])
+        self.n_events = len(self.metadata)
+        logger.info(f"Loaded {self.n_events:,} events from {split} split")
 
-    return result
+        # Extract metadata columns as numpy arrays for fast access
+        self.batch_ids = self.metadata.column("batch_id").to_numpy()
+        self.event_ids = self.metadata.column("event_id").to_numpy()
+        self.first_pulse_idx = self.metadata.column("first_pulse_index").to_numpy()
+        self.last_pulse_idx = self.metadata.column("last_pulse_index").to_numpy()
+        self.bucket_ids = self.metadata.column("bucket_id").to_numpy()
+        self.pulse_counts = self.metadata.column("pulse_count").to_numpy()
 
+        if split == "train":
+            self.azimuth = self.metadata.column("azimuth").to_numpy()
+            self.zenith = self.metadata.column("zenith").to_numpy()
 
-def collate_with_dom_grouping(
-    batch: List[Dict[str, torch.Tensor]]
-) -> Dict[str, torch.Tensor]:
-    """
-    Collate function that groups pulses by DOM for hierarchical transformer.
+        # Simple LRU cache for batch files
+        self.cache_size = cache_size
+        self.batch_cache: Dict[int, pa.Table] = {}
+        self.cache_access_order: List[int] = []
 
-    Creates pulse_to_dom_idx mapping where each (event, DOM) pair gets a unique index.
-    This is the correct grouping for T1 (DOM-level) transformer.
+    def __len__(self) -> int:
+        return self.n_events
 
-    Args:
-        batch: List of event dicts from IceCubeDataset
+    def _load_batch(self, batch_id: int) -> pa.Table:
+        """Load a batch file with LRU caching."""
+        if batch_id in self.batch_cache:
+            # Move to end of access order (most recently used)
+            self.cache_access_order.remove(batch_id)
+            self.cache_access_order.append(batch_id)
+            return self.batch_cache[batch_id]
 
-    Returns:
-        Dict with:
-            - pulse_features: (total_pulses, 4) - all pulses flattened
-            - pulse_to_dom_idx: (total_pulses,) - which DOM each pulse belongs to
-            - dom_pulse_counts: (total_doms,) - number of pulses per DOM
-            - dom_to_event_idx: (total_doms,) - which event each DOM belongs to
-            - dom_ids: (total_doms,) - original sensor IDs
-            - event_dom_counts: (batch_size,) - number of DOMs per event
-            - targets: (batch_size, 2) - azimuth, zenith (if available)
-            - event_ids: (batch_size,) - event IDs
-    """
-    batch_size = len(batch)
+        # Load batch file
+        batch_path = self.data_root / self.split / f"batch_{batch_id}.parquet"
+        batch_table = pq.read_table(batch_path)
 
-    all_pulse_features = []
-    pulse_to_dom_idx_list = []
-    dom_pulse_counts = []
-    dom_to_event_idx = []
-    dom_ids = []
-    event_dom_counts = []
+        # Update cache
+        self.batch_cache[batch_id] = batch_table
+        self.cache_access_order.append(batch_id)
 
-    current_dom_idx = 0
+        # Evict oldest if cache is full
+        if len(self.batch_cache) > self.cache_size:
+            oldest_batch_id = self.cache_access_order.pop(0)
+            del self.batch_cache[oldest_batch_id]
 
-    for event_idx, event in enumerate(batch):
-        pulse_features = event['pulse_features']  # (n_pulses, 4)
-        n_pulses = pulse_features.shape[0]
+        return batch_table
 
-        # Extract sensor IDs (column 2 of pulse features)
-        sensor_ids = pulse_features[:, 2].long()
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """Get a single event with optional subsampling."""
+        # Get event metadata
+        batch_id = self.batch_ids[idx]
+        event_id = self.event_ids[idx]
+        first_pulse = self.first_pulse_idx[idx]
+        last_pulse = self.last_pulse_idx[idx]
+        n_pulses = last_pulse - first_pulse + 1
+        bucket_id = self.bucket_ids[idx]
 
-        # Find unique DOMs in this event
-        unique_doms = torch.unique(sensor_ids, sorted=True)
-        n_doms_in_event = len(unique_doms)
-        event_dom_counts.append(n_doms_in_event)
+        # Load batch and extract event
+        batch_table = self._load_batch(batch_id)
+        event_table = batch_table.slice(first_pulse, n_pulses)
 
-        # Group pulses by DOM
-        for dom_id in unique_doms:
-            # Find pulses belonging to this DOM
-            dom_mask = (sensor_ids == dom_id)
-            dom_pulses = pulse_features[dom_mask]
-            n_pulses_in_dom = dom_pulses.shape[0]
+        # Extract features
+        time = event_table.column("time").to_numpy()
+        charge = event_table.column("charge").to_numpy()
+        sensor_id = event_table.column("sensor_id").to_numpy()
+        auxiliary = event_table.column("auxiliary").to_numpy()
 
-            # Add to batch
-            all_pulse_features.append(dom_pulses)
-            dom_pulse_counts.append(n_pulses_in_dom)
-            dom_to_event_idx.append(event_idx)
-            dom_ids.append(dom_id.item())
+        # Perform uniform random subsampling if needed
+        if n_pulses > self.max_seq_len:
+            # Uniform random sampling
+            indices = np.random.choice(n_pulses, size=self.max_seq_len, replace=False)
+            indices = np.sort(indices)  # Keep temporal order
+            time = time[indices]
+            charge = charge[indices]
+            sensor_id = sensor_id[indices]
+            auxiliary = auxiliary[indices]
+            n_pulses = self.max_seq_len
 
-            # Track which DOM index each pulse belongs to
-            pulse_to_dom_idx_list.extend([current_dom_idx] * n_pulses_in_dom)
+        # Stack features: [time, charge, sensor_id, auxiliary]
+        pulse_features = np.stack(
+            [time, charge, sensor_id, auxiliary.astype(np.float32)], axis=1
+        )
 
-            current_dom_idx += 1
+        # Convert to torch tensors
+        result = {
+            "pulse_features": torch.from_numpy(pulse_features).float(),
+            "event_id": torch.tensor(event_id, dtype=torch.long),
+            "n_pulses": torch.tensor(n_pulses, dtype=torch.long),
+            "bucket_id": torch.tensor(bucket_id, dtype=torch.long),
+        }
 
-    # Stack everything
-    result = {
-        # Pulse-level (for T1)
-        'pulse_features': torch.cat(all_pulse_features, dim=0),  # (total_pulses, 4)
-        'pulse_to_dom_idx': torch.tensor(pulse_to_dom_idx_list, dtype=torch.long),
-        'dom_pulse_counts': torch.tensor(dom_pulse_counts, dtype=torch.long),
+        # Add targets for training split
+        if self.split == "train":
+            target = np.array([self.azimuth[idx], self.zenith[idx]], dtype=np.float32)
+            result["target"] = torch.from_numpy(target)
 
-        # DOM-level metadata (for T2)
-        'dom_to_event_idx': torch.tensor(dom_to_event_idx, dtype=torch.long),
-        'dom_ids': torch.tensor(dom_ids, dtype=torch.long),
-        'event_dom_counts': torch.tensor(event_dom_counts, dtype=torch.long),
-
-        # Event-level
-        'event_ids': torch.stack([b['event_id'] for b in batch]),
-        'total_doms': current_dom_idx,
-        'batch_size': batch_size
-    }
-
-    # Add targets if available
-    if 'target' in batch[0]:
-        result['targets'] = torch.stack([b['target'] for b in batch])
-
-    return result
+        return result
 
 
 def get_dataloader(
@@ -399,6 +359,76 @@ def get_dataloader(
         num_workers=num_workers,
         collate_fn=collate_func,
         pin_memory=True,  # Faster GPU transfer
+    )
+
+    return dataloader
+
+
+def get_subsampled_dataloader(
+    metadata_path: str,
+    data_root: str,
+    split: str = "train",
+    batch_size: int = 4096,
+    max_seq_len: int = 512,
+    num_workers: int = 4,
+    max_events: Optional[int] = None,
+    drop_last: bool = False,
+    cache_size: int = 1,
+) -> torch.utils.data.DataLoader:
+    """
+    Create a DataLoader for subsampled IceCube events with bucketed batching.
+
+    This creates a high-throughput dataloader optimized for padded transformers:
+    - Uses IceCubeSubsampledDataset for uniform random subsampling
+    - Uses BucketBatchSampler for batch-aware + length-bucketing
+    - Uses collate_padded_subsampled for efficient padding
+
+    Args:
+        metadata_path: Path to event_metadata.parquet (with bucket_id column)
+        data_root: Root directory containing batch files
+        split: 'train' or 'test'
+        batch_size: Number of events per batch (default: 4096 for high throughput)
+        max_seq_len: Maximum sequence length (events exceeding this are subsampled, default: 512)
+        num_workers: Number of worker processes (default: 4, tune for performance)
+        max_events: Optional limit on number of events
+        drop_last: If True, drop incomplete batches (default: False)
+        cache_size: Number of batch files to cache (default: 1, optimal for BucketBatchSampler)
+
+    Returns:
+        DataLoader with padded batching for subsampled events
+    """
+    # Create dataset
+    dataset = IceCubeSubsampledDataset(
+        metadata_path=metadata_path,
+        data_root=data_root,
+        split=split,
+        max_seq_len=max_seq_len,
+        max_events=max_events,
+        cache_size=cache_size,
+    )
+
+    # Create batch sampler (combines batch-aware + bucketing)
+    batch_sampler = BucketBatchSampler(
+        metadata=dataset.metadata,
+        batch_size=batch_size,
+        drop_last=drop_last,
+    )
+
+    # Create dataloader
+    # Note: When using batch_sampler, batch_size and shuffle must not be specified
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_sampler=batch_sampler,
+        num_workers=num_workers,
+        collate_fn=collate_padded_subsampled,
+        pin_memory=True,  # Faster GPU transfer
+        persistent_workers=num_workers > 0,  # Keep workers alive between epochs
+    )
+
+    logger.info(
+        f"Created subsampled dataloader: {len(dataset):,} events, "
+        f"{len(batch_sampler):,} batches, batch_size={batch_size}, "
+        f"num_workers={num_workers}, max_seq_len={max_seq_len}"
     )
 
     return dataloader
