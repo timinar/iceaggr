@@ -1,0 +1,60 @@
+# Extra-large model configuration - overnight training on 10M events
+#
+# Usage:
+#   CUDA_VISIBLE_DEVICES=0 uv run python scripts/train_simple.py --config configs/train_config_xlarge.yaml
+
+# Model architecture - SCALED UP (memory-optimized)
+model:
+  embed_dim: 192             # 1.5x from large (128)
+  max_doms: 256              # Same as large (memory-limited)
+  pulse_hidden_dim: 192      # 1.5x from large (128)
+
+  # DOM encoder
+  dom_encoder_type: pooling
+  pool_method: mean_max      # Use both mean and max pooling
+
+  # Event transformer - DEEPER
+  event_num_heads: 12        # 1.5x from large (8)
+  event_num_layers: 6        # 1.5x from large (4)
+  event_hidden_dim: 768      # 1.5x from large (512)
+
+  # Direction head
+  head_hidden_dim: 384       # 1.5x from large (256)
+
+  # Regularization - increased for larger model
+  dropout: 0.15
+
+# Training parameters
+training:
+  epochs: 20                 # Fewer epochs since more data
+  batch_size: 1024           # Should fit with 1.5x model
+  lr: 1e-3                   # max_lr for OneCycleLR
+  warmup_steps: 2000         # More warmup for larger model
+  weight_decay: 0.01
+  gradient_clip: 1.0
+
+  # Mixed precision
+  use_amp: true
+
+# Data - 10M events
+data:
+  max_events: 10000000   # 10M events
+  val_events: 100000     # 100K validation
+  num_workers: 8         # More workers for larger dataset
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+
+# Logging
+wandb:
+  enabled: true
+  project: iceaggr
+  name: null
+  tags:
+    - hierarchical-dom
+    - xlarge-model
+    - 10M-events
+
+# Checkpointing
+checkpoint:
+  dir: checkpoints
+  save_every: 5
+  resume: null

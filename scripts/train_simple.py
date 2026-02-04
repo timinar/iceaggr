@@ -147,6 +147,7 @@ def train_epoch(
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
     device: str,
     epoch: int,
     config: dict,
@@ -176,14 +177,19 @@ def train_epoch(
         scaler.step(optimizer)
         scaler.update()
 
+        # Step LR scheduler (OneCycleLR needs per-step updates)
+        scheduler.step()
+
         total_loss += loss.item()
 
         # Log to wandb
         if wandb_run is not None and (batch_idx + 1) % 25 == 0:
             step = (epoch - 1) * n_batches + batch_idx
+            current_lr = scheduler.get_last_lr()[0]
             wandb_run.log({
                 "train/loss": loss.item(),
                 "train/loss_deg": torch.rad2deg(torch.tensor(loss.item())).item(),
+                "train/lr": current_lr,
             }, step=step)
 
         # Progress every 25 batches
@@ -270,11 +276,19 @@ def main():
         weight_decay=float(config['training']['weight_decay']),
     )
 
-    # LR scheduler
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    # LR scheduler - OneCycleLR with warmup
+    total_steps = len(loader) * config['training']['epochs']
+    warmup_steps = config['training'].get('warmup_steps', 1000)
+    pct_start = min(warmup_steps / total_steps, 0.3)  # Cap at 30% of training
+
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
-        T_max=config['training']['epochs'],
-        eta_min=float(config['training']['lr']) * float(config['training']['min_lr_ratio']),
+        max_lr=float(config['training']['lr']),
+        total_steps=total_steps,
+        pct_start=pct_start,
+        anneal_strategy='cos',
+        div_factor=25.0,        # Initial LR = max_lr / 25
+        final_div_factor=1000.0,  # Final LR = max_lr / 1000
     )
 
     # AMP scaler
@@ -298,14 +312,13 @@ def main():
     logger.info(f"LR: {config['training']['lr']}, Pool: {config['model']['pool_method']}")
 
     for epoch in range(start_epoch, config['training']['epochs'] + 1):
-        # Train
-        train_loss = train_epoch(model, loader, optimizer, scaler, device, epoch, config, wandb_run)
+        # Train (scheduler steps per-batch inside train_epoch)
+        train_loss = train_epoch(model, loader, optimizer, scaler, scheduler, device, epoch, config, wandb_run)
 
         # Validate
         val_loss = validate(model, loader, device, config)
 
-        # Step scheduler
-        scheduler.step()
+        # Get current LR (scheduler already stepped per-batch)
         current_lr = scheduler.get_last_lr()[0]
 
         # Log epoch summary

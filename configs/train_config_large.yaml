@@ -28,13 +28,10 @@ model:
 training:
   epochs: 50
   batch_size: 2048           # Reduced for larger model
-  lr: 5e-4                   # Slightly lower for larger model
+  lr: 1e-3                   # max_lr for OneCycleLR
+  warmup_steps: 1000         # Warmup steps for OneCycleLR
   weight_decay: 0.01
   gradient_clip: 1.0
-
-  # Learning rate schedule
-  scheduler: cosine
-  min_lr_ratio: 0.01
 
   # Mixed precision
   use_amp: true
