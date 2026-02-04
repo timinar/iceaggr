@@ -10,6 +10,7 @@ from .samplers import BatchAwareSampler, BucketBatchSampler
 from .collators import (
     collate_variable_length,
     collate_with_dom_grouping,
+    collate_with_dom_grouping_legacy,
     collate_padded_subsampled,
     make_collate_with_geometry,
 )
@@ -28,6 +29,7 @@ __all__ = [
     # Collators
     "collate_variable_length",
     "collate_with_dom_grouping",
+    "collate_with_dom_grouping_legacy",
     "collate_padded_subsampled",
     "make_collate_with_geometry",
     # Geometry

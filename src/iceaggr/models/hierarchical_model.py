@@ -187,7 +187,7 @@ class HierarchicalDOMModel(nn.Module):
         batch_size: int,
     ) -> tuple:
         """
-        Pad/subsample DOMs to fixed (batch_size, max_doms, embed_dim).
+        Vectorized pad/subsample DOMs to fixed (batch_size, max_doms, embed_dim).
 
         If an event has more than max_doms DOMs, randomly subsample.
         If fewer, zero-pad.
@@ -206,39 +206,81 @@ class HierarchicalDOMModel(nn.Module):
                 - padding_mask: (batch_size, max_doms) - True for valid
         """
         device = dom_embeds.device
+        total_doms = dom_embeds.shape[0]
 
-        # Initialize padded tensors
+        # Compute within-event DOM index using cumsum trick
+        # dom_starts[i] = index of first DOM in event i
+        dom_starts = torch.zeros(batch_size + 1, dtype=torch.long, device=device)
+        dom_starts[1:] = event_dom_counts.cumsum(0)
+
+        # For each DOM, compute its index within its event (0, 1, 2, ...)
+        dom_idx_in_event = torch.arange(total_doms, device=device) - dom_starts[dom_to_event_idx]
+
+        # Clamp counts to max_doms for output sizing
+        clamped_counts = event_dom_counts.clamp(max=self.max_doms)
+
+        # Determine which DOMs to keep (handle subsampling for large events)
+        # For events with n_doms <= max_doms: keep all
+        # For events with n_doms > max_doms: keep random subset
+        needs_subsample = event_dom_counts > self.max_doms
+
+        if needs_subsample.any():
+            # Generate random priorities for subsampling
+            random_priority = torch.rand(total_doms, device=device)
+
+            # For DOMs in events needing subsampling, rank by random priority
+            # Keep DOM if its rank < max_doms
+            keep_mask = torch.ones(total_doms, dtype=torch.bool, device=device)
+
+            # Process events needing subsampling
+            for event_idx in needs_subsample.nonzero(as_tuple=True)[0]:
+                start = dom_starts[event_idx]
+                end = dom_starts[event_idx + 1]
+                event_priorities = random_priority[start:end]
+                # Get indices of top max_doms by priority
+                _, top_indices = event_priorities.topk(self.max_doms, largest=True)
+                # Mark all as not kept, then mark top ones as kept
+                keep_mask[start:end] = False
+                keep_mask[start + top_indices] = True
+
+            # Filter to kept DOMs
+            kept_indices = keep_mask.nonzero(as_tuple=True)[0]
+            dom_embeds = dom_embeds[kept_indices]
+            dom_positions = dom_positions[kept_indices]
+            dom_to_event_idx = dom_to_event_idx[kept_indices]
+
+            # Recompute within-event indices for kept DOMs
+            # Use cumsum trick again
+            kept_dom_starts = torch.zeros(batch_size + 1, dtype=torch.long, device=device)
+            kept_dom_starts[1:] = clamped_counts.cumsum(0)
+            dom_idx_in_event = torch.arange(dom_embeds.shape[0], device=device) - kept_dom_starts[dom_to_event_idx]
+        else:
+            # No subsampling needed - dom_idx_in_event already computed
+            pass
+
+        # Now scatter into padded tensors
+        # Valid positions are where dom_idx_in_event < max_doms
+        valid_mask = dom_idx_in_event < self.max_doms
+        valid_event_idx = dom_to_event_idx[valid_mask]
+        valid_dom_idx = dom_idx_in_event[valid_mask]
+        valid_embeds = dom_embeds[valid_mask]
+        valid_positions = dom_positions[valid_mask]
+
+        # Initialize output tensors (match input dtype for AMP compatibility)
         dom_embeds_padded = torch.zeros(
-            batch_size, self.max_doms, self.embed_dim, device=device
+            batch_size, self.max_doms, self.embed_dim, device=device, dtype=valid_embeds.dtype
         )
         dom_positions_padded = torch.zeros(
-            batch_size, self.max_doms, 3, device=device
+            batch_size, self.max_doms, 3, device=device, dtype=valid_positions.dtype
         )
         padding_mask = torch.zeros(
             batch_size, self.max_doms, dtype=torch.bool, device=device
         )
 
-        # Fill in for each event
-        dom_offset = 0
-        for event_idx in range(batch_size):
-            n_doms = event_dom_counts[event_idx].item()
-
-            # Get this event's DOM data
-            event_dom_embeds = dom_embeds[dom_offset:dom_offset + n_doms]
-            event_dom_positions = dom_positions[dom_offset:dom_offset + n_doms]
-
-            if n_doms > self.max_doms:
-                # Random subsample
-                indices = torch.randperm(n_doms, device=device)[:self.max_doms]
-                event_dom_embeds = event_dom_embeds[indices]
-                event_dom_positions = event_dom_positions[indices]
-                n_doms = self.max_doms
-
-            dom_embeds_padded[event_idx, :n_doms] = event_dom_embeds
-            dom_positions_padded[event_idx, :n_doms] = event_dom_positions
-            padding_mask[event_idx, :n_doms] = True
-
-            dom_offset += event_dom_counts[event_idx].item()
+        # Scatter embeddings and positions
+        dom_embeds_padded[valid_event_idx, valid_dom_idx] = valid_embeds
+        dom_positions_padded[valid_event_idx, valid_dom_idx] = valid_positions
+        padding_mask[valid_event_idx, valid_dom_idx] = True
 
         return dom_embeds_padded, dom_positions_padded, padding_mask
 

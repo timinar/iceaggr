@@ -66,30 +66,14 @@ def collate_variable_length(
     return result
 
 
-def collate_with_dom_grouping(
+def collate_with_dom_grouping_legacy(
     batch: List[Dict[str, torch.Tensor]]
 ) -> Dict[str, torch.Tensor]:
     """
-    Collate function that groups pulses by DOM for hierarchical transformer.
+    Legacy collate function that groups pulses by DOM (O(B × D × P) complexity).
 
-    Creates pulse_to_dom_idx mapping where each (event, DOM) pair gets a unique index.
-    This is the correct grouping for T1 (DOM-level) transformer.
-
-    Args:
-        batch: List of event dicts from IceCubeDataset
-
-    Returns:
-        Dict with:
-            - pulse_features: (total_pulses, 4) - all pulses flattened
-            - pulse_to_dom_idx: (total_pulses,) - which DOM each pulse belongs to
-            - pulse_idx_in_dom: (total_pulses,) - index of pulse within its DOM
-            - n_pulses_in_dom: (total_pulses,) - total pulses in DOM (broadcast)
-            - dom_pulse_counts: (total_doms,) - number of pulses per DOM
-            - dom_to_event_idx: (total_doms,) - which event each DOM belongs to
-            - dom_ids: (total_doms,) - original sensor IDs
-            - event_dom_counts: (batch_size,) - number of DOMs per event
-            - targets: (batch_size, 2) - azimuth, zenith (if available)
-            - event_ids: (batch_size,) - event IDs
+    Kept for A/B testing against the vectorized version.
+    See collate_with_dom_grouping for the optimized implementation.
     """
     batch_size = len(batch)
 
@@ -157,6 +141,120 @@ def collate_with_dom_grouping(
         # Event-level
         'event_ids': torch.stack([b['event_id'] for b in batch]),
         'total_doms': current_dom_idx,
+        'batch_size': batch_size
+    }
+
+    # Add targets if available
+    if 'target' in batch[0]:
+        result['targets'] = torch.stack([b['target'] for b in batch])
+
+    return result
+
+
+# Maximum sensor ID in IceCube detector (5160 DOMs total, 0-indexed)
+MAX_SENSOR_ID = 5160
+
+
+def collate_with_dom_grouping(
+    batch: List[Dict[str, torch.Tensor]]
+) -> Dict[str, torch.Tensor]:
+    """
+    Vectorized collate function that groups pulses by DOM for hierarchical transformer.
+
+    This is an optimized O(N log N) implementation using torch.unique instead of
+    nested Python loops (which were O(B × D × P)).
+
+    Creates pulse_to_dom_idx mapping where each (event, DOM) pair gets a unique index.
+    This is the correct grouping for T1 (DOM-level) transformer.
+
+    Args:
+        batch: List of event dicts from IceCubeDataset
+
+    Returns:
+        Dict with:
+            - pulse_features: (total_pulses, 4) - all pulses sorted by DOM
+            - pulse_to_dom_idx: (total_pulses,) - which DOM each pulse belongs to
+            - pulse_idx_in_dom: (total_pulses,) - index of pulse within its DOM
+            - n_pulses_in_dom: (total_pulses,) - total pulses in DOM (broadcast)
+            - dom_pulse_counts: (total_doms,) - number of pulses per DOM
+            - dom_to_event_idx: (total_doms,) - which event each DOM belongs to
+            - dom_ids: (total_doms,) - original sensor IDs
+            - event_dom_counts: (batch_size,) - number of DOMs per event
+            - targets: (batch_size, 2) - azimuth, zenith (if available)
+            - event_ids: (batch_size,) - event IDs
+    """
+    batch_size = len(batch)
+
+    # 1. Concatenate all events
+    pulse_features_list = [event['pulse_features'] for event in batch]
+    event_lengths = torch.tensor(
+        [pf.shape[0] for pf in pulse_features_list], dtype=torch.long
+    )
+    all_features = torch.cat(pulse_features_list, dim=0)  # (N, 4)
+    total_pulses = all_features.shape[0]
+
+    # Extract sensor IDs from column 2
+    sensor_ids = all_features[:, 2].long()
+
+    # Create pulse-to-event mapping
+    pulse_event_idx = torch.repeat_interleave(
+        torch.arange(batch_size, dtype=torch.long), event_lengths
+    )
+
+    # 2. Combined key = event_idx * MAX_SENSOR_ID + sensor_id
+    # This creates unique keys for each (event, DOM) pair
+    combined_key = pulse_event_idx * MAX_SENSOR_ID + sensor_ids
+
+    # 3. Single torch.unique call replaces ALL nested loops
+    # sorted=True ensures DOMs are ordered by (event_idx, sensor_id)
+    unique_keys, inverse_idx, dom_counts = torch.unique(
+        combined_key, return_inverse=True, return_counts=True, sorted=True
+    )
+    total_doms = unique_keys.shape[0]
+
+    # 4. Sort pulses by DOM (stable=True preserves temporal order within each DOM)
+    sort_order = torch.argsort(inverse_idx, stable=True)
+    sorted_features = all_features[sort_order]
+
+    # Map inverse indices to sorted positions
+    sorted_pulse_to_dom = inverse_idx[sort_order]
+
+    # 5. Within-DOM indices via cumsum trick
+    # dom_starts[i] = index of first pulse in DOM i
+    dom_starts = torch.cat([
+        torch.zeros(1, dtype=torch.long),
+        dom_counts.cumsum(0)[:-1]
+    ])
+    # For each pulse, subtract the start index of its DOM
+    pulse_idx_in_dom = torch.arange(total_pulses, dtype=torch.long) - dom_starts[sorted_pulse_to_dom]
+
+    # Broadcast DOM counts to each pulse
+    n_pulses_in_dom = dom_counts[sorted_pulse_to_dom]
+
+    # 6. DOM metadata from key decoding
+    dom_event_idx = unique_keys // MAX_SENSOR_ID
+    dom_sensor_ids = unique_keys % MAX_SENSOR_ID
+
+    # 7. Count DOMs per event
+    event_dom_counts = torch.bincount(dom_event_idx, minlength=batch_size)
+
+    # Build result
+    result = {
+        # Pulse-level (for T1)
+        'pulse_features': sorted_features,  # (total_pulses, 4)
+        'pulse_to_dom_idx': sorted_pulse_to_dom,
+        'pulse_idx_in_dom': pulse_idx_in_dom,
+        'n_pulses_in_dom': n_pulses_in_dom,
+        'dom_pulse_counts': dom_counts,
+
+        # DOM-level metadata (for T2)
+        'dom_to_event_idx': dom_event_idx,
+        'dom_ids': dom_sensor_ids,
+        'event_dom_counts': event_dom_counts,
+
+        # Event-level
+        'event_ids': torch.stack([b['event_id'] for b in batch]),
+        'total_doms': total_doms,
         'batch_size': batch_size
     }
 

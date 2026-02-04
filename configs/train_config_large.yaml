@@ -1,0 +1,62 @@
+# Large model configuration - targeting loss < 1.0 rad
+#
+# Usage:
+#   CUDA_VISIBLE_DEVICES=0 uv run python scripts/train_simple.py --config configs/train_config_large.yaml
+
+# Model architecture - LARGER
+model:
+  embed_dim: 128             # Doubled from 64
+  max_doms: 256              # Doubled from 128
+  pulse_hidden_dim: 128      # Doubled from 64
+
+  # DOM encoder
+  dom_encoder_type: pooling
+  pool_method: mean_max      # Use both mean and max pooling
+
+  # Event transformer - DEEPER
+  event_num_heads: 8         # Doubled from 4
+  event_num_layers: 4        # Doubled from 2
+  event_hidden_dim: 512      # Doubled from 256
+
+  # Direction head
+  head_hidden_dim: 256       # Doubled from 128
+
+  # Regularization
+  dropout: 0.1
+
+# Training parameters
+training:
+  epochs: 50
+  batch_size: 2048           # Reduced for larger model
+  lr: 5e-4                   # Slightly lower for larger model
+  weight_decay: 0.01
+  gradient_clip: 1.0
+
+  # Learning rate schedule
+  scheduler: cosine
+  min_lr_ratio: 0.01
+
+  # Mixed precision
+  use_amp: true
+
+# Data
+data:
+  max_events: 2000000    # 2M events across multiple parquet files
+  val_events: 50000
+  num_workers: 4
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+
+# Logging
+wandb:
+  enabled: true
+  project: iceaggr
+  name: null
+  tags:
+    - hierarchical-dom
+    - large-model
+
+# Checkpointing
+checkpoint:
+  dir: checkpoints
+  save_every: 10
+  resume: null
