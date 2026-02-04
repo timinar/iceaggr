@@ -141,6 +141,16 @@ class HierarchicalDOMModel(nn.Module):
         pulse_embeds = self.pulse_embedder(pulse_features)
 
         # 3. Aggregate to DOM level
+        # Prepare physics features dict if available
+        dom_physics = None
+        if 'dom_min_time' in batch:
+            dom_physics = {
+                'dom_min_time': batch['dom_min_time'],
+                'dom_sum_charge': batch['dom_sum_charge'],
+                'dom_std_time': batch['dom_std_time'],
+                'dom_pulse_counts': batch['dom_pulse_counts'],
+            }
+
         if self._use_transformer_dom:
             dom_embeds = self.dom_encoder(
                 pulse_embeds,
@@ -155,15 +165,19 @@ class HierarchicalDOMModel(nn.Module):
                 batch['pulse_to_dom_idx'],
                 batch['total_doms'],
                 pulse_idx_in_dom=batch['pulse_idx_in_dom'],
+                dom_physics=dom_physics,
             )
 
         # 4. Reshape to (batch_size, max_doms, embed_dim) with padding/subsampling
+        # Use dom_min_time for time-based selection (keep earliest DOMs, not random)
+        dom_min_time = batch.get('dom_min_time', None)
         dom_embeds_padded, dom_positions_padded, padding_mask = self._pad_to_batch(
             dom_embeds,
             batch['dom_positions'],
             batch['dom_to_event_idx'],
             batch['event_dom_counts'],
             batch['batch_size'],
+            dom_min_time=dom_min_time,
         )
 
         # 5. Event transformer
@@ -185,11 +199,13 @@ class HierarchicalDOMModel(nn.Module):
         dom_to_event_idx: torch.Tensor,
         event_dom_counts: torch.Tensor,
         batch_size: int,
+        dom_min_time: Optional[torch.Tensor] = None,
     ) -> tuple:
         """
         Vectorized pad/subsample DOMs to fixed (batch_size, max_doms, embed_dim).
 
-        If an event has more than max_doms DOMs, randomly subsample.
+        If an event has more than max_doms DOMs, select based on earliest arrival time
+        (critical for direction reconstruction - the first photons define the track).
         If fewer, zero-pad.
 
         Args:
@@ -198,6 +214,7 @@ class HierarchicalDOMModel(nn.Module):
             dom_to_event_idx: (total_doms,) - event index for each DOM
             event_dom_counts: (batch_size,) - DOMs per event
             batch_size: Number of events
+            dom_min_time: (total_doms,) - first pulse time per DOM (for time-based selection)
 
         Returns:
             Tuple of:
@@ -221,23 +238,27 @@ class HierarchicalDOMModel(nn.Module):
 
         # Determine which DOMs to keep (handle subsampling for large events)
         # For events with n_doms <= max_doms: keep all
-        # For events with n_doms > max_doms: keep random subset
+        # For events with n_doms > max_doms: keep earliest DOMs by min_time
         needs_subsample = event_dom_counts > self.max_doms
 
         if needs_subsample.any():
-            # Generate random priorities for subsampling
-            random_priority = torch.rand(total_doms, device=device)
+            # Use time-based priority: smaller time = higher priority (keep earliest DOMs)
+            # This preserves causality - the "arrow" of the particle is defined by first hits
+            if dom_min_time is not None:
+                # Negate time so topk picks smallest times (earliest DOMs)
+                priority = -dom_min_time.to(device)
+            else:
+                # Fallback to random if no timing info (should not happen)
+                priority = torch.rand(total_doms, device=device)
 
-            # For DOMs in events needing subsampling, rank by random priority
-            # Keep DOM if its rank < max_doms
             keep_mask = torch.ones(total_doms, dtype=torch.bool, device=device)
 
             # Process events needing subsampling
             for event_idx in needs_subsample.nonzero(as_tuple=True)[0]:
                 start = dom_starts[event_idx]
                 end = dom_starts[event_idx + 1]
-                event_priorities = random_priority[start:end]
-                # Get indices of top max_doms by priority
+                event_priorities = priority[start:end]
+                # Get indices of top max_doms by priority (highest = earliest time)
                 _, top_indices = event_priorities.topk(self.max_doms, largest=True)
                 # Mark all as not kept, then mark top ones as kept
                 keep_mask[start:end] = False

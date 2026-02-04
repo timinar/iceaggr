@@ -238,6 +238,31 @@ def collate_with_dom_grouping(
     # 7. Count DOMs per event
     event_dom_counts = torch.bincount(dom_event_idx, minlength=batch_size)
 
+    # 8. Compute physics features per DOM (critical for direction reconstruction)
+    # These preserve exact timing/energy info that pooling would destroy
+    sorted_times = sorted_features[:, 0]  # time is column 0
+    sorted_charges = sorted_features[:, 1]  # charge is column 1
+
+    # min_time per DOM (first photon arrival - critical for direction)
+    dom_min_time = torch.zeros(total_doms, dtype=sorted_features.dtype)
+    dom_min_time.fill_(float('inf'))
+    dom_min_time.scatter_reduce_(0, sorted_pulse_to_dom, sorted_times, reduce='amin', include_self=False)
+
+    # sum_charge per DOM (total energy deposited)
+    dom_sum_charge = torch.zeros(total_doms, dtype=sorted_features.dtype)
+    dom_sum_charge.scatter_add_(0, sorted_pulse_to_dom, sorted_charges)
+
+    # std_time per DOM (temporal spread - helps distinguish track vs cascade)
+    # Compute via E[X^2] - E[X]^2
+    dom_sum_time = torch.zeros(total_doms, dtype=sorted_features.dtype)
+    dom_sum_time.scatter_add_(0, sorted_pulse_to_dom, sorted_times)
+    dom_mean_time = dom_sum_time / dom_counts.float().clamp(min=1)
+
+    dom_sum_time_sq = torch.zeros(total_doms, dtype=sorted_features.dtype)
+    dom_sum_time_sq.scatter_add_(0, sorted_pulse_to_dom, sorted_times ** 2)
+    dom_mean_time_sq = dom_sum_time_sq / dom_counts.float().clamp(min=1)
+    dom_std_time = (dom_mean_time_sq - dom_mean_time ** 2).clamp(min=0).sqrt()
+
     # Build result
     result = {
         # Pulse-level (for T1)
@@ -251,6 +276,11 @@ def collate_with_dom_grouping(
         'dom_to_event_idx': dom_event_idx,
         'dom_ids': dom_sensor_ids,
         'event_dom_counts': event_dom_counts,
+
+        # DOM-level physics features (preserves exact timing/energy info)
+        'dom_min_time': dom_min_time,      # (total_doms,) - first photon arrival
+        'dom_sum_charge': dom_sum_charge,  # (total_doms,) - total energy
+        'dom_std_time': dom_std_time,      # (total_doms,) - temporal spread
 
         # Event-level
         'event_ids': torch.stack([b['event_id'] for b in batch]),

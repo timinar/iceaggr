@@ -76,14 +76,16 @@ def scatter_max(src: torch.Tensor, index: torch.Tensor, dim: int = 0, dim_size: 
 
 class DOMPooling(nn.Module):
     """
-    Simple pooling-based DOM encoder.
+    Pooling-based DOM encoder with physics feature preservation.
 
-    Aggregates pulse embeddings within each DOM using scatter operations.
-    Supports mean pooling, max pooling, concatenated mean+max, or first-only.
+    Aggregates pulse embeddings within each DOM using scatter operations,
+    then concatenates explicit physics features (min_time, sum_charge, std_time)
+    that are critical for direction reconstruction but destroyed by pooling.
 
     Args:
         embed_dim: Embedding dimension (default: 64)
         pool_method: Pooling method - "mean", "max", "mean_max", or "first" (default: "mean_max")
+        use_physics_features: Whether to use min_time, sum_charge, std_time (default: True)
 
     Example:
         >>> encoder = DOMPooling(embed_dim=64, pool_method="mean_max")
@@ -93,10 +95,14 @@ class DOMPooling(nn.Module):
         >>> dom_embeds.shape  # (50, 64)
     """
 
+    # Number of physics features: min_time, sum_charge, std_time, n_pulses
+    N_PHYSICS_FEATURES = 4
+
     def __init__(
         self,
         embed_dim: int = 64,
         pool_method: str = "mean_max",
+        use_physics_features: bool = True,
     ):
         super().__init__()
 
@@ -105,12 +111,17 @@ class DOMPooling(nn.Module):
 
         self.embed_dim = embed_dim
         self.pool_method = pool_method
+        self.use_physics_features = use_physics_features
 
+        # Determine pooling output dimension
         if pool_method == "mean_max":
-            # Concatenate mean and max, then project back to embed_dim
-            self.projection = nn.Linear(embed_dim * 2, embed_dim)
+            pool_out_dim = embed_dim * 2
         else:
-            self.projection = None
+            pool_out_dim = embed_dim
+
+        # Input to projection: pooled embeddings + optional physics features
+        proj_in_dim = pool_out_dim + (self.N_PHYSICS_FEATURES if use_physics_features else 0)
+        self.projection = nn.Linear(proj_in_dim, embed_dim)
 
     def forward(
         self,
@@ -118,6 +129,7 @@ class DOMPooling(nn.Module):
         pulse_to_dom_idx: torch.Tensor,
         num_doms: int,
         pulse_idx_in_dom: Optional[torch.Tensor] = None,
+        dom_physics: Optional[dict] = None,
     ) -> torch.Tensor:
         """
         Aggregate pulse embeddings to DOM embeddings.
@@ -127,61 +139,70 @@ class DOMPooling(nn.Module):
             pulse_to_dom_idx: (total_pulses,) - DOM index for each pulse
             num_doms: Total number of DOMs in the batch
             pulse_idx_in_dom: (total_pulses,) - Index within DOM (needed for "first" mode)
+            dom_physics: Optional dict with 'dom_min_time', 'dom_sum_charge',
+                        'dom_std_time', 'dom_pulse_counts' (each (num_doms,))
 
         Returns:
             DOM embeddings (num_doms, embed_dim)
         """
+        # 1. Compute pooled embeddings
         if self.pool_method == "first":
-            # Take only the first pulse from each DOM (simplest baseline)
             if pulse_idx_in_dom is None:
                 raise ValueError("pulse_idx_in_dom required for 'first' pool_method")
-
-            # Find indices where pulse_idx_in_dom == 0 (first pulse in each DOM)
             first_pulse_mask = pulse_idx_in_dom == 0
             first_pulse_embeds = pulse_embeddings[first_pulse_mask]
             first_pulse_dom_idx = pulse_to_dom_idx[first_pulse_mask]
-
-            # Place into output tensor
-            dom_embeds = torch.zeros(num_doms, self.embed_dim,
-                                     dtype=pulse_embeddings.dtype,
-                                     device=pulse_embeddings.device)
-            dom_embeds[first_pulse_dom_idx] = first_pulse_embeds
-            return dom_embeds
+            pooled = torch.zeros(num_doms, self.embed_dim,
+                                 dtype=pulse_embeddings.dtype,
+                                 device=pulse_embeddings.device)
+            pooled[first_pulse_dom_idx] = first_pulse_embeds
 
         elif self.pool_method == "mean":
-            return scatter_mean(
-                pulse_embeddings,
-                pulse_to_dom_idx,
-                dim=0,
-                dim_size=num_doms,
+            pooled = scatter_mean(
+                pulse_embeddings, pulse_to_dom_idx, dim=0, dim_size=num_doms
             )
 
         elif self.pool_method == "max":
-            # scatter_max returns (values, indices), we only need values
-            return scatter_max(
-                pulse_embeddings,
-                pulse_to_dom_idx,
-                dim=0,
-                dim_size=num_doms,
+            pooled = scatter_max(
+                pulse_embeddings, pulse_to_dom_idx, dim=0, dim_size=num_doms
             )[0]
 
         else:  # mean_max
             mean_pool = scatter_mean(
-                pulse_embeddings,
-                pulse_to_dom_idx,
-                dim=0,
-                dim_size=num_doms,
+                pulse_embeddings, pulse_to_dom_idx, dim=0, dim_size=num_doms
             )
             max_pool = scatter_max(
-                pulse_embeddings,
-                pulse_to_dom_idx,
-                dim=0,
-                dim_size=num_doms,
+                pulse_embeddings, pulse_to_dom_idx, dim=0, dim_size=num_doms
             )[0]
+            pooled = torch.cat([mean_pool, max_pool], dim=-1)
 
-            # Concatenate and project
-            concat = torch.cat([mean_pool, max_pool], dim=-1)
-            return self.projection(concat)
+        # 2. Add physics features if enabled and available
+        if self.use_physics_features and dom_physics is not None:
+            # Normalize physics features to similar scale as embeddings
+            # min_time: (time - 1e4) / 3e4  (same as pulse normalization)
+            min_time_norm = (dom_physics['dom_min_time'] - 1e4) / 3e4
+
+            # sum_charge: log10(charge) / 3.0
+            sum_charge_norm = torch.log10(dom_physics['dom_sum_charge'].clamp(min=1e-6)) / 3.0
+
+            # std_time: / 3e4 (same scale as time)
+            std_time_norm = dom_physics['dom_std_time'] / 3e4
+
+            # n_pulses: log / 3.0 - 1.0 (same as pulse normalization)
+            n_pulses_norm = torch.log1p(dom_physics['dom_pulse_counts'].float()) / 3.0 - 1.0
+
+            physics_features = torch.stack([
+                min_time_norm, sum_charge_norm, std_time_norm, n_pulses_norm
+            ], dim=-1)  # (num_doms, 4)
+
+            # Match dtype with pooled embeddings
+            physics_features = physics_features.to(pooled.dtype)
+
+            # Concatenate: pooled + physics
+            pooled = torch.cat([pooled, physics_features], dim=-1)
+
+        # 3. Project to embed_dim
+        return self.projection(pooled)
 
 
 class DOMTransformerEncoder(nn.Module):
