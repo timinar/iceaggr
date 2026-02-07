@@ -379,3 +379,177 @@ def make_collate_with_geometry(
         return result
 
     return collate_fn
+
+
+def make_collate_flat(
+    geometry: "GeometryLoader",
+    max_pulses_per_dom: int = 84,
+    max_doms: int = 128,
+) -> Callable[[List[Dict[str, torch.Tensor]]], Dict[str, torch.Tensor]]:
+    """
+    Single-pass collator for the flat transformer model.
+
+    Fuses DOM grouping + flat vector building + geometry lookup + event padding
+    into one function. Avoids creating intermediate sorted_features tensor and
+    skips physics features (dom_sum_charge, dom_std_time) that the flat model
+    doesn't use.
+
+    Compared to collate_with_dom_grouping + build_flat_dom_vectors + pad_to_event_batch:
+    - Skips full N-pulse gather (sorted_features) — only gathers first K pulses per DOM
+    - Skips dom_sum_charge, dom_std_time, n_pulses_in_dom broadcast
+    - One function call instead of three, no intermediate tensors
+
+    Args:
+        geometry: GeometryLoader instance with sensor positions
+        max_pulses_per_dom: K, first K pulses kept per DOM (default: 84)
+        max_doms: max DOMs per event, rest subsampled by earliest time (default: 128)
+
+    Returns:
+        Collate function producing a dict with:
+            - dom_vectors: (batch_size, max_doms, input_dim) padded flat DOM features
+            - padding_mask: (batch_size, max_doms) True = valid DOM
+            - targets: (batch_size, 2) azimuth, zenith (if available)
+            - event_ids: (batch_size,)
+            - batch_size: int
+
+    Example:
+        >>> geometry = GeometryLoader("/path/to/sensor_geometry.csv")
+        >>> collate_fn = make_collate_flat(geometry, max_pulses_per_dom=84, max_doms=128)
+        >>> loader = DataLoader(dataset, batch_size=32, collate_fn=collate_fn)
+        >>> batch = next(iter(loader))
+        >>> batch['dom_vectors'].shape  # (32, 128, 256)
+    """
+    K = max_pulses_per_dom
+    input_dim = 4 + 3 * K  # [x, y, z, log_n_pulses, t1, q1, a1, ..., tK, qK, aK]
+
+    def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        batch_size = len(batch)
+
+        # --- 1. Concatenate all events ---
+        pulse_features_list = [event['pulse_features'] for event in batch]
+        event_lengths = torch.tensor(
+            [pf.shape[0] for pf in pulse_features_list], dtype=torch.long
+        )
+        all_features = torch.cat(pulse_features_list, dim=0)  # (N, 4)
+        total_pulses = all_features.shape[0]
+
+        sensor_ids = all_features[:, 2].long()
+        pulse_event_idx = torch.repeat_interleave(
+            torch.arange(batch_size, dtype=torch.long), event_lengths
+        )
+
+        # --- 2. DOM grouping via torch.unique ---
+        combined_key = pulse_event_idx * MAX_SENSOR_ID + sensor_ids
+        unique_keys, inverse_idx, dom_counts = torch.unique(
+            combined_key, return_inverse=True, return_counts=True, sorted=True
+        )
+        total_doms = unique_keys.shape[0]
+
+        # --- 3. Compute pulse_idx_in_dom without creating sorted_features ---
+        # argsort to group by DOM (stable preserves time order within DOM)
+        sort_order = torch.argsort(inverse_idx, stable=True)
+        sorted_dom_idx = inverse_idx[sort_order]
+
+        dom_starts = torch.zeros(total_doms + 1, dtype=torch.long)
+        dom_starts[1:] = dom_counts.cumsum(0)
+        pulse_idx_in_dom_sorted = (
+            torch.arange(total_pulses, dtype=torch.long) - dom_starts[sorted_dom_idx]
+        )
+
+        # Map back to original pulse order
+        pulse_idx_in_dom = torch.empty(total_pulses, dtype=torch.long)
+        pulse_idx_in_dom[sort_order] = pulse_idx_in_dom_sorted
+
+        # --- 4. Keep only first K pulses per DOM, scatter into flat vectors ---
+        keep_mask = pulse_idx_in_dom < K
+        kept_features = all_features[keep_mask]       # only the pulses we need
+        kept_dom_idx = inverse_idx[keep_mask]
+        kept_pulse_idx = pulse_idx_in_dom[keep_mask]
+
+        # Normalize
+        time_norm = (kept_features[:, 0] - 1e4) / 3e4
+        charge_norm = torch.log10(kept_features[:, 1].clamp(min=1e-6)) / 3.0
+        aux_norm = kept_features[:, 3] - 0.5
+
+        # Scatter into (total_doms, K, 3)
+        pulse_tensor = torch.zeros(total_doms, K, 3, dtype=all_features.dtype)
+        pulse_tensor[kept_dom_idx, kept_pulse_idx, 0] = time_norm
+        pulse_tensor[kept_dom_idx, kept_pulse_idx, 1] = charge_norm
+        pulse_tensor[kept_dom_idx, kept_pulse_idx, 2] = aux_norm
+
+        # --- 5. Build full DOM vectors with geometry ---
+        dom_sensor_ids = unique_keys % MAX_SENSOR_ID
+        dom_positions = geometry[dom_sensor_ids]  # (total_doms, 3)
+
+        n_pulses_norm = (torch.log1p(dom_counts.float()) / 3.0 - 1.0).unsqueeze(1)
+
+        # [x, y, z, n_pulses, pulse_flat] → (total_doms, input_dim)
+        dom_vectors = torch.cat([
+            dom_positions,                                  # (D, 3)
+            n_pulses_norm,                                  # (D, 1)
+            pulse_tensor.reshape(total_doms, K * 3),        # (D, K*3)
+        ], dim=1)
+
+        # --- 6. DOM min_time for subsampling (cheap: just first pulse per DOM) ---
+        first_pulse_mask = pulse_idx_in_dom == 0
+        dom_min_time = torch.zeros(total_doms, dtype=all_features.dtype)
+        dom_min_time[inverse_idx[first_pulse_mask]] = all_features[first_pulse_mask, 0]
+
+        # --- 7. Pad to (batch_size, max_doms, input_dim) with attention mask ---
+        dom_event_idx = unique_keys // MAX_SENSOR_ID
+        event_dom_counts = torch.bincount(dom_event_idx, minlength=batch_size)
+
+        dom_event_starts = torch.zeros(batch_size + 1, dtype=torch.long)
+        dom_event_starts[1:] = event_dom_counts.cumsum(0)
+        dom_idx_in_event = (
+            torch.arange(total_doms, dtype=torch.long) - dom_event_starts[dom_event_idx]
+        )
+
+        needs_subsample = event_dom_counts > max_doms
+        if needs_subsample.any():
+            priority = -dom_min_time
+            keep = torch.ones(total_doms, dtype=torch.bool)
+
+            for ev in needs_subsample.nonzero(as_tuple=True)[0]:
+                s = dom_event_starts[ev]
+                e = dom_event_starts[ev + 1]
+                _, top = priority[s:e].topk(max_doms, largest=True)
+                keep[s:e] = False
+                keep[s + top] = True
+
+            kept_idx = keep.nonzero(as_tuple=True)[0]
+            dom_vectors = dom_vectors[kept_idx]
+            dom_event_idx = dom_event_idx[kept_idx]
+
+            clamped = event_dom_counts.clamp(max=max_doms)
+            kept_starts = torch.zeros(batch_size + 1, dtype=torch.long)
+            kept_starts[1:] = clamped.cumsum(0)
+            dom_idx_in_event = (
+                torch.arange(dom_vectors.shape[0], dtype=torch.long)
+                - kept_starts[dom_event_idx]
+            )
+
+        valid = dom_idx_in_event < max_doms
+        ev_idx = dom_event_idx[valid]
+        d_idx = dom_idx_in_event[valid]
+
+        padded = torch.zeros(batch_size, max_doms, input_dim, dtype=dom_vectors.dtype)
+        mask = torch.zeros(batch_size, max_doms, dtype=torch.bool)
+
+        padded[ev_idx, d_idx] = dom_vectors[valid]
+        mask[ev_idx, d_idx] = True
+
+        # --- Build result ---
+        result = {
+            'dom_vectors': padded,    # (B, max_doms, input_dim)
+            'padding_mask': mask,     # (B, max_doms)
+            'event_ids': torch.stack([b['event_id'] for b in batch]),
+            'batch_size': batch_size,
+        }
+
+        if 'target' in batch[0]:
+            result['targets'] = torch.stack([b['target'] for b in batch])
+
+        return result
+
+    return collate_fn
