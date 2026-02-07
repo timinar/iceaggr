@@ -12,6 +12,11 @@ from .dom_encoder import DOMPooling, DOMTransformerEncoder
 from .event_transformer import EventTransformer, TransformerBlock
 from .directional_head import DirectionalHead
 from .hierarchical_model import HierarchicalDOMModel, count_parameters
+from .flat_transformer import (
+    FlatTransformerModel,
+    build_flat_dom_vectors,
+    pad_to_event_batch,
+)
 
 __all__ = [
     # Losses
@@ -31,7 +36,11 @@ __all__ = [
     "TransformerBlock",
     # Direction prediction
     "DirectionalHead",
-    # Full model
+    # Full model (hierarchical)
     "HierarchicalDOMModel",
     "count_parameters",
+    # Full model (flat/simplified)
+    "FlatTransformerModel",
+    "build_flat_dom_vectors",
+    "pad_to_event_batch",
 ]
