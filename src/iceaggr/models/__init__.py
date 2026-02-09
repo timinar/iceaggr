@@ -17,6 +17,7 @@ from .flat_transformer import (
     build_flat_dom_vectors,
     pad_to_event_batch,
 )
+from .flat_transformer_v2 import FlatTransformerV2
 
 __all__ = [
     # Losses
@@ -43,4 +44,6 @@ __all__ = [
     "FlatTransformerModel",
     "build_flat_dom_vectors",
     "pad_to_event_batch",
+    # Full model (flat v2 / nanochat-style)
+    "FlatTransformerV2",
 ]

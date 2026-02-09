@@ -39,8 +39,10 @@ class DirectionalHead(nn.Module):
         self.activation = nn.GELU()  # GELU instead of ReLU to avoid dead neurons
         self.fc2 = nn.Linear(hidden_dim, 3)
 
-        # Initialize fc2 with small weights to encourage diverse initial predictions
-        nn.init.normal_(self.fc2.weight, std=0.01)
+        # Xavier normal gives std ≈ 0.124 for Linear(128→3), producing diverse
+        # initial predictions. (std=0.01 caused mode collapse — all predictions
+        # collapsed to the same direction.)
+        nn.init.xavier_normal_(self.fc2.weight)
         nn.init.zeros_(self.fc2.bias)
 
     def forward(self, event_embedding: torch.Tensor) -> torch.Tensor:

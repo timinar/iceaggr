@@ -1,0 +1,50 @@
+# Flat transformer v2 — No input projection (identity)
+#
+# nanochat-style architecture with NO input transform.
+# Requires d_model = input_dim = 4 + 3*16 = 52.
+# Tests whether raw features in residual stream help vs learned projection.
+#
+# NOTE: d_model=52 is not divisible by 8, so num_heads=4 (52/4=13 head_dim).
+#
+# Usage:
+#   CUDA_VISIBLE_DEVICES=1 uv run python scripts/train_flat.py --config configs/train_flat_v2_none.yaml
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 16
+  d_model: 52              # Must match input_dim = 4 + 3*16
+  max_doms: 128
+  num_heads: 4             # 52/4 = 13 head_dim
+  num_layers: 4
+  hidden_dim: 208          # 4x d_model
+  head_hidden_dim: 128
+  dropout: 0.1
+
+training:
+  epochs: 10
+  batch_size: 256
+  lr: 1e-4
+  warmup_steps: 1000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  max_events: 10000000
+  val_events: 50000
+  num_workers: 4
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: null
+  tags:
+    - flat-transformer-v2
+    - input-none
+
+checkpoint:
+  dir: checkpoints
+  save_every: 5
+  resume: null

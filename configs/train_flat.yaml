@@ -1,0 +1,55 @@
+# Training configuration for flat transformer model
+#
+# Instead of hierarchical T1→T2, this model concatenates the first K raw
+# pulse features per DOM into a flat vector, then runs a single event-level
+# transformer.
+#
+# K=16 covers 98.1% of DOMs (p50=1 pulse, p90=3, p95=5).
+# K=84 covered 99.6% but left 98.6% of features as zeros → no learning.
+#
+# Usage:
+#   CUDA_VISIBLE_DEVICES=0 uv run python scripts/train_flat.py --config configs/train_flat.yaml
+#   CUDA_VISIBLE_DEVICES=0 uv run python scripts/train_flat.py --config configs/train_flat.yaml --lr 1e-3
+
+# Model architecture
+model:
+  max_pulses_per_dom: 16   # K=16 → input_dim = 4 + 3*16 = 52, covers 98% of DOMs
+  d_model: 128             # Project 52-dim input up to 128
+  max_doms: 128            # Covers 99%+ of events
+  num_heads: 8
+  num_layers: 4
+  hidden_dim: 256
+  head_hidden_dim: 128
+  dropout: 0.1
+
+# Training parameters
+training:
+  epochs: 10
+  batch_size: 256          # Transformer over 129 tokens is lightweight
+  lr: 1e-4                  # 1e-3 causes 3-epoch plateau; 1e-4 converges steadily
+  warmup_steps: 1000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+# Data
+data:
+  max_events: 10000000
+  val_events: 50000
+  num_workers: 4
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+
+# Logging
+wandb:
+  enabled: true
+  project: iceaggr
+  name: null               # Auto-generated if null
+  tags:
+    - flat-transformer
+    - baseline
+
+# Checkpointing
+checkpoint:
+  dir: checkpoints
+  save_every: 5
+  resume: null             # Path to checkpoint to resume from
