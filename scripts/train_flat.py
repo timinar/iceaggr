@@ -60,6 +60,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate")
     parser.add_argument("--checkpoint", type=str, default=None, help="Override checkpoint to resume")
+    parser.add_argument("--workers", type=int, default=None, help="Override num_workers")
     parser.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     parser.add_argument("--name", type=str, default=None, help="Run name for wandb")
 
@@ -80,6 +81,8 @@ def apply_cli_overrides(config: dict, args) -> dict:
         config['checkpoint']['resume'] = args.checkpoint
     if args.no_wandb:
         config['wandb']['enabled'] = False
+    if args.workers is not None:
+        config['data']['num_workers'] = args.workers
     if args.name is not None:
         config['wandb']['name'] = args.name
     return config
@@ -132,13 +135,16 @@ def create_dataloader(config: dict, geometry: GeometryLoader, split: str = 'trai
         max_doms=config['model']['max_doms'],
     )
 
+    num_workers = config['data']['num_workers']
     loader = DataLoader(
         dataset,
         batch_size=config['training']['batch_size'],
         sampler=sampler,
-        num_workers=config['data']['num_workers'],
+        num_workers=num_workers,
         collate_fn=collate_fn,
         pin_memory=True,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=4 if num_workers > 0 else None,
     )
 
     return loader
