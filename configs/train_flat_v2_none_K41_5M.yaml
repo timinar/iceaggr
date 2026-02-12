@@ -30,6 +30,9 @@ data:
   val_events: 50000
   num_workers: 4
   geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+  val_per_epoch: 5
 
 wandb:
   enabled: true
