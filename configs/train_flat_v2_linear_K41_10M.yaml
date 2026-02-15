@@ -1,34 +1,33 @@
-# v2 none K=41 scaled to ~5M params
+# v2 linear K=41 scaled to ~10M params
 #
-# Scale-up of the best small model (57.5° at 592K params).
-# d_model 128→256, hidden 256→1024, layers 4→6.
-# No input projection — raw features zero-padded to d_model=256.
+# Scale-up from 5M: d_model 256→384, hidden 1024→1280.
+# Linear input projection (d_model >> input_dim, zero-padding would waste 257/384 dims).
 
 model:
   version: v2
-  input_mode: none
+  input_mode: linear
   max_pulses_per_dom: 41
-  d_model: 256
+  d_model: 384
   max_doms: 128
   num_heads: 8
   num_layers: 6
-  hidden_dim: 1024
+  hidden_dim: 1280
   head_hidden_dim: 1024
   dropout: 0.1
 
 training:
   epochs: 10
-  batch_size: 256
-  lr: 1e-4
+  batch_size: 4096
+  lr: 3e-4
   warmup_steps: 2000
   weight_decay: 0.01
   gradient_clip: 1.0
   use_amp: true
 
 data:
-  max_events: 10000000
+  max_events: 200000000
   val_events: 1000000
-  num_workers: 4
+  num_workers: 8
   geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
   train_batches: [1, 650]
   val_batches: [651, 655]
@@ -41,8 +40,8 @@ wandb:
   tags:
     - flat-transformer-v2
     - K41
-    - 5M-params
-    - input-none
+    - 10M-params
+    - input-linear
     - scale-up
 
 checkpoint:
