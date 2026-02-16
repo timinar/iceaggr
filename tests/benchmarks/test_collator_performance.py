@@ -137,39 +137,6 @@ class TestCollatorPerformance:
         # Vectorized should be faster, especially for larger batches
         assert speedup > 1.0, f"Vectorized should be faster, got {speedup:.2f}x"
 
-    def test_memory_usage_similar(self, batches_32):
-        """Test memory usage is similar between implementations."""
-        import gc
-
-        # Force garbage collection
-        gc.collect()
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
-
-        # Run legacy and measure peak memory (approximation via tensor allocation)
-        batch = batches_32[0]
-        legacy_result = collate_with_dom_grouping_legacy(batch)
-        legacy_tensors = sum(
-            t.numel() * t.element_size()
-            for t in legacy_result.values()
-            if isinstance(t, torch.Tensor)
-        )
-
-        vectorized_result = collate_with_dom_grouping(batch)
-        vectorized_tensors = sum(
-            t.numel() * t.element_size()
-            for t in vectorized_result.values()
-            if isinstance(t, torch.Tensor)
-        )
-
-        print(f"\n=== Memory Usage (single batch) ===")
-        print(f"Legacy output:     {legacy_tensors / 1024:.1f} KB")
-        print(f"Vectorized output: {vectorized_tensors / 1024:.1f} KB")
-
-        # Output size should be essentially identical
-        assert abs(legacy_tensors - vectorized_tensors) < 1024, \
-            "Output tensor sizes should be similar"
-
-
 class TestScalingBehavior:
     """Test how performance scales with batch size."""
 

@@ -5,10 +5,10 @@ This module provides different batching strategies:
 - collate_variable_length: Continuous batching (no padding)
 - collate_with_dom_grouping: Hierarchical DOM-based grouping
 - collate_padded_subsampled: Padded batching with subsampling (for standard transformers)
-- make_collate_with_geometry: Factory for collators with geometry lookup
+- make_collate_flat: Factory for flat transformer collators with geometry lookup
 """
 
-from typing import Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Callable, Dict, List, TYPE_CHECKING
 
 import torch
 
@@ -345,40 +345,6 @@ def collate_padded_subsampled(
         result["targets"] = torch.stack([item["target"] for item in batch])
 
     return result
-
-
-def make_collate_with_geometry(
-    geometry: "GeometryLoader",
-) -> Callable[[List[Dict[str, torch.Tensor]]], Dict[str, torch.Tensor]]:
-    """
-    Factory function to create a collator with geometry lookup.
-
-    This wraps collate_with_dom_grouping to add DOM positions from the geometry file.
-
-    Args:
-        geometry: GeometryLoader instance with sensor positions
-
-    Returns:
-        Collate function that adds 'dom_positions' to the batch dict
-
-    Example:
-        >>> from iceaggr.data import GeometryLoader, make_collate_with_geometry
-        >>> geometry = GeometryLoader("/path/to/sensor_geometry.csv")
-        >>> collate_fn = make_collate_with_geometry(geometry)
-        >>> dataloader = DataLoader(dataset, collate_fn=collate_fn)
-    """
-
-    def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        # First, apply standard DOM grouping
-        result = collate_with_dom_grouping(batch)
-
-        # Add DOM positions from geometry
-        dom_ids = result['dom_ids']  # (total_doms,)
-        result['dom_positions'] = geometry[dom_ids]  # (total_doms, 3)
-
-        return result
-
-    return collate_fn
 
 
 def make_collate_flat(

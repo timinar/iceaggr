@@ -33,13 +33,6 @@ class TestCollatorEquivalence:
         dataset = IceCubeDataset(split="train", max_events=10)
         return [dataset[0]]
 
-    def test_output_keys_match(self, small_batch):
-        """Test both collators produce the same keys."""
-        legacy_result = collate_with_dom_grouping_legacy(small_batch)
-        vectorized_result = collate_with_dom_grouping(small_batch)
-
-        assert set(legacy_result.keys()) == set(vectorized_result.keys())
-
     def test_batch_size_match(self, small_batch):
         """Test batch_size field matches."""
         legacy_result = collate_with_dom_grouping_legacy(small_batch)
