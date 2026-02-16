@@ -4,26 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**iceaggr** is a research project developing hierarchical transformer models for precise angular reconstruction of high-energy neutrino events in IceCube. The key challenge is handling events with thousands of pulses using DOM-level aggregation.
+**iceaggr** is a research project developing transformer models for precise angular reconstruction of high-energy neutrino events in IceCube. The model predicts neutrino direction (azimuth, zenith) from photomultiplier pulse data across ~5000 Digital Optical Modules (DOMs).
 
 ### Core Architecture Concept
 
-The project implements a two-stage hierarchical transformer:
+The project uses a **flat transformer** approach (`FlatTransformerV2`, ~5-10M params, achieves 55-56° angular error):
 
-1. **T1 (DOM-level transformer)**: Aggregates pulses within each Digital Optical Module (DOM) → produces DOM embeddings
-   - Challenge: Variable sequence lengths (1 to 1000s of pulses per DOM)
-   - Solution: Continuous batching with FlexAttention for dynamic sequences
+1. **DOM-level aggregation**: For each DOM, concatenate the first K pulse features (time, charge, auxiliary flag) into a fixed-length vector, prepend geometry (x,y,z) and pulse count
+2. **Single transformer**: Process all DOM vectors with a standard transformer (RMSNorm, QK-norm attention, ReLU² FFN, residual scaling)
+3. **CLS token**: Prepended learnable token; its output embedding is fed to a directional head that predicts unit vector → (azimuth, zenith)
 
-2. **T2 (Event-level transformer)**: Aggregates DOM embeddings across the event → predicts neutrino direction
-   - Input: DOM embeddings + geometry (x,y,z positions)
-   - Max ~2000 active DOMs per event (manageable for standard attention)
+Key design choices (nanochat/GPT-inspired):
+- Functional RMSNorm, no learnable norm params
+- Zero-init output projections (attention c_proj, FFN c_proj)
+- Per-layer residual scaling + skip connection to initial embedding
+- Configurable input projection: none / linear / MLP
 
 ### Key Technical Challenges
 
-- **Variable-length sequences**: 1 pulse/DOM to 1000s of pulses/DOM requiring efficient batching
-- **Parallel DOM processing**: Using continuous batching with attention masking
-- **Single-pulse DOMs**: ~50-70% of DOMs have ≤10 pulses, need lightweight path
-- **Heavy-tailed distribution**: Some events have 10K+ pulses requiring special handling
+- **DOM subsampling**: Events can have up to ~2000 active DOMs; max_doms parameter limits sequence length (default: 128, selected by earliest arrival time)
+- **Pulse truncation**: Each DOM keeps first K pulses (K=16-84); remaining are discarded
+- **Loss function**: Angular distance loss on unit vectors (great-circle distance)
 
 ## Development Setup
 
@@ -73,19 +74,21 @@ uv run mypy src/                 # Type checking
 ```
 iceaggr/
 ├── src/iceaggr/              # Main code (importable package)
-│   ├── config/              # Configuration utilities (to be created)
-│   ├── data/                # DataLoaders with DOM grouping ✓
-│   ├── models/              # T1 and T2 transformer architectures (to be created)
-│   ├── training/            # Training loops and utilities (to be created)
+│   ├── data/                # DataLoaders, collators, geometry ✓
+│   ├── models/              # Flat transformer, losses, directional head ✓
+│   │   ├── flat_transformer_v2.py  # Main model (FlatTransformerV2)
+│   │   ├── flat_transformer.py     # V1 flat model (FlatTransformerModel)
+│   │   ├── event_transformer.py    # TransformerBlock (used by v1)
+│   │   ├── directional_head.py     # Unit vector → angles prediction
+│   │   └── losses.py               # Angular distance loss
+│   ├── training/            # (placeholder, training is in scripts/)
 │   └── utils/               # Logging utilities ✓
-├── configs/                 # Experiment configurations (to be created)
-│   ├── experiment/          # Full experiment configs
-│   └── model/               # Model-specific configs
+├── configs/                 # Flat transformer training configs ✓
+│   └── train_flat_v2_*.yaml # Various model size/input projection configs
+├── archive/configs/         # Old hierarchical model configs (preserved)
 ├── notes/                   # Design documentation (committed) ✓
-│   ├── 03_dom_aggregation_architecture.md    # Architecture design
-│   └── 04_flex_attention_benchmark_results.md # Benchmarking results
-├── personal_notes/          # Personal notes, experiments (gitignored)
-├── scripts/                 # Standalone analysis/training scripts ✓
+├── scripts/                 # Training and analysis scripts ✓
+│   └── train_flat.py        # Main training script
 ├── notebooks/               # Jupyter notebooks for experiments
 ├── tests/                   # Unit and integration tests ✓
 ├── src/iceaggr/data/data_config.yaml         # Local data paths (gitignored) ✓
@@ -93,7 +96,7 @@ iceaggr/
 └── pyproject.toml           # Dependencies and project config ✓
 ```
 
-**Current state**: Data loading complete (✓). Design docs complete (✓). Next: Model implementation.
+**Current state**: Flat transformer trained and achieving 55-56° angular error. Data loading, model, and training pipeline all functional.
 
 ## Configuration Management
 
@@ -237,8 +240,7 @@ See `src/iceaggr/utils/logger_config.py` for implementation. Original by [Midori
 ## Key Technologies
 
 - **PyTorch**: Deep learning framework
-- **PyTorch FlexAttention**: For variable-length sequence handling in transformers
-- **PyTorch Lightning**: Training framework (to be added)
+- **PyTorch Lightning**: Training framework
 - **Polars / PyArrow**: Fast dataframe operations for analysis (NOT pandas - too slow!)
 - **UV**: Python package and environment manager
 - **Weights & Biases**: Experiment tracking
@@ -280,10 +282,11 @@ cat ~/.ssh/id_ed25519.pub  # Add to GitHub Settings → SSH keys
 ssh -T git@github.com      # Test connection
 ```
 
-## Next Development Steps (as per README)
+## Next Development Steps
 
-- [ ] Dataloader implementation with DOM grouping
-- [ ] DOM-level transformer (T1) with FlexAttention
-- [ ] Event-level transformer (T2)
-- [ ] End-to-end training pipeline
+- [x] Dataloader implementation with DOM grouping
+- [x] Flat transformer model (FlatTransformerV2)
+- [x] End-to-end training pipeline (train_flat.py)
+- [x] Scale-up experiments (5M, 10M params)
 - [ ] Comparison with spline-mpe baseline
+- [ ] Paper figures and analysis

@@ -1,0 +1,47 @@
+# v2 linear projection, K=41 pulses/DOM, big DirectionalHead (512)
+#
+# K=41 covers 99.9%+ DOMs. input_dim = 4 + 3*41 = 127.
+# Linear(127→128) projects to d_model.
+# head_hidden_dim=512 (4× d_model) gives more capacity for direction prediction.
+
+model:
+  version: v2
+  input_mode: linear
+  max_pulses_per_dom: 41
+  d_model: 128
+  max_doms: 128
+  num_heads: 8
+  num_layers: 4
+  hidden_dim: 256
+  head_hidden_dim: 512
+  dropout: 0.1
+
+training:
+  epochs: 10
+  batch_size: 256
+  lr: 1e-4
+  warmup_steps: 1000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  max_events: 10000000
+  val_events: 50000
+  num_workers: 4
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: null
+  tags:
+    - flat-transformer-v2
+    - K41
+    - bighead
+    - input-linear
+
+checkpoint:
+  dir: checkpoints
+  save_every: 5
+  resume: null

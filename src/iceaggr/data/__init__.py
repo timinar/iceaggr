@@ -12,7 +12,7 @@ from .collators import (
     collate_with_dom_grouping,
     collate_with_dom_grouping_legacy,
     collate_padded_subsampled,
-    make_collate_with_geometry,
+    make_collate_flat,
 )
 from .geometry import GeometryLoader
 
@@ -31,7 +31,7 @@ __all__ = [
     "collate_with_dom_grouping",
     "collate_with_dom_grouping_legacy",
     "collate_padded_subsampled",
-    "make_collate_with_geometry",
+    "make_collate_flat",
     # Geometry
     "GeometryLoader",
 ]

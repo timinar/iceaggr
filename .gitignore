@@ -218,3 +218,6 @@ personal_notes/
 
 # Weights & Biases
 wandb/
+
+# Paper (Overleaf repo inside)
+paper/

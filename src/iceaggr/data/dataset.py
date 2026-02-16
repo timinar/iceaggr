@@ -35,6 +35,7 @@ class IceCubeDataset(Dataset):
         split: 'train' or 'test'
         max_events: Optional limit on number of events (for testing)
         cache_size: Number of batch files to keep in LRU cache (default: 1)
+        batch_range: Optional (min_batch, max_batch) inclusive to filter by batch_id
 
     Returns:
         Dict with keys:
@@ -50,6 +51,7 @@ class IceCubeDataset(Dataset):
         split: str = "train",
         max_events: Optional[int] = None,
         cache_size: int = 1,
+        batch_range: Optional[tuple] = None,
     ):
         assert split in ["train", "test"], f"split must be 'train' or 'test', got {split}"
 
@@ -67,6 +69,15 @@ class IceCubeDataset(Dataset):
         meta_path = self.data_root / f"{split}_meta.parquet"
         logger.info(f"Loading metadata from {meta_path}...")
         self.metadata = pq.read_table(meta_path)
+
+        # Filter by batch_id range if specified
+        if batch_range is not None:
+            min_batch, max_batch = batch_range
+            batch_ids = self.metadata.column("batch_id").to_numpy()
+            mask = (batch_ids >= min_batch) & (batch_ids <= max_batch)
+            indices = np.where(mask)[0]
+            self.metadata = self.metadata.take(indices)
+            logger.info(f"Filtered to batch_id [{min_batch}, {max_batch}]: {len(self.metadata):,} events")
 
         if max_events is not None:
             self.metadata = self.metadata.slice(0, max_events)

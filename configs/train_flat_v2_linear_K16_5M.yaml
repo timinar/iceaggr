@@ -1,0 +1,48 @@
+# v2 linear K=16 scaled to ~5M params
+#
+# Scale-up of the fastest small model (57.0° at 548K params).
+# d_model 128→256, hidden 256→1024, layers 4→6.
+# Linear(52→256) input projection.
+
+model:
+  version: v2
+  input_mode: linear
+  max_pulses_per_dom: 16
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+training:
+  epochs: 10
+  batch_size: 256
+  lr: 1e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  max_events: 10000000
+  val_events: 50000
+  num_workers: 4
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: null
+  tags:
+    - flat-transformer-v2
+    - K16
+    - 5M-params
+    - input-linear
+    - scale-up
+
+checkpoint:
+  dir: checkpoints
+  save_every: 5
+  resume: null
