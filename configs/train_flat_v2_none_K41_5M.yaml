@@ -47,5 +47,5 @@ wandb:
 
 checkpoint:
   dir: checkpoints
-  save_every: 5
+  save_every: 1
   resume: null
