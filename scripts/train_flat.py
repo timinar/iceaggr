@@ -263,7 +263,7 @@ def train_epoch(
             # Save best model checkpoint
             if val_loss < best_loss and checkpoint_dir is not None:
                 best_loss = val_loss
-                checkpoint_path = checkpoint_dir / "best_flat_model.pt"
+                checkpoint_path = checkpoint_dir / "best.pt"
                 torch.save({
                     'epoch': epoch,
                     'model': model.state_dict(),
@@ -331,6 +331,14 @@ def main():
             logger.warning("wandb not installed, skipping logging")
         except Exception as e:
             logger.warning(f"Failed to init wandb: {e}")
+
+    # Determine run_name for checkpoint directory
+    if wandb_run is not None:
+        pass  # run_name already set above
+    elif config['wandb'].get('name'):
+        run_name = config['wandb']['name']
+    else:
+        run_name = f"flat-{datetime.now().strftime('%m%d-%H%M')}"
 
     # Load geometry
     geometry = GeometryLoader(config['data']['geometry_path'])
@@ -409,6 +417,11 @@ def main():
     checkpoint_dir = Path(config['checkpoint']['dir'])
     checkpoint_dir.mkdir(exist_ok=True)
 
+    # Per-run checkpoint subdirectory
+    run_checkpoint_dir = checkpoint_dir / run_name
+    run_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Checkpoints will be saved to: {run_checkpoint_dir}")
+
     # Training loop
     logger.info(f"Starting training for {config['training']['epochs']} epochs...")
     logger.info(f"LR: {config['training']['lr']}, d_model: {config['model']['d_model']}, layers: {config['model']['num_layers']}")
@@ -423,7 +436,7 @@ def main():
             val_loader=val_loader,
             val_interval=val_interval,
             best_loss=best_loss,
-            checkpoint_dir=checkpoint_dir,
+            checkpoint_dir=run_checkpoint_dir,
         )
 
         # End-of-epoch validation
@@ -457,7 +470,7 @@ def main():
         # Save checkpoint if best
         if val_loss < best_loss:
             best_loss = val_loss
-            checkpoint_path = checkpoint_dir / "best_flat_model.pt"
+            checkpoint_path = run_checkpoint_dir / "best.pt"
             torch.save({
                 'epoch': epoch,
                 'model': model.state_dict(),
@@ -472,7 +485,7 @@ def main():
         # Save periodic checkpoint
         save_every = config['checkpoint'].get('save_every', 5)
         if epoch % save_every == 0:
-            latest_path = checkpoint_dir / f"flat_epoch_{epoch:03d}.pt"
+            latest_path = run_checkpoint_dir / f"epoch_{epoch:03d}.pt"
             torch.save({
                 'epoch': epoch,
                 'model': model.state_dict(),
