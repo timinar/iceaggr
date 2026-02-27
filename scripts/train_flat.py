@@ -346,6 +346,8 @@ def main():
 
     # Create model
     model = create_model(config, device)
+    model = torch.compile(model)
+    logger.info("Model compiled with torch.compile")
 
     # Create dataloaders
     train_batch_range = None
