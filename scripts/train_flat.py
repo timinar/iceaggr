@@ -169,7 +169,7 @@ def create_dataloader(
         prefetch_factor=4 if num_workers > 0 else None,
     )
 
-    return loader
+    return loader, sampler
 
 
 def train_epoch(
@@ -186,6 +186,7 @@ def train_epoch(
     val_interval: int = None,
     best_loss: float = float('inf'),
     checkpoint_dir: Path = None,
+    start_batch: int = 0,
 ) -> tuple:
     """Train for one epoch with optional mid-epoch validation.
 
@@ -195,10 +196,12 @@ def train_epoch(
     model.train()
 
     total_loss = 0.0
-    n_batches = len(loader)
+    n_batches = len(loader)  # full epoch batch count (for progress display)
+    n_trained = 0
     start_time = time.time()
 
     for batch_idx, batch in enumerate(loader):
+        actual_batch = start_batch + batch_idx
         dom_vectors = batch['dom_vectors'].to(device)
         padding_mask = batch['padding_mask'].to(device)
         targets = batch['targets'].to(device)
@@ -221,10 +224,11 @@ def train_epoch(
         scheduler.step()
 
         total_loss += loss.item()
+        n_trained += 1
 
         # Log to wandb
-        if wandb_run is not None and (batch_idx + 1) % 25 == 0:
-            step = (epoch - 1) * n_batches + batch_idx
+        if wandb_run is not None and (actual_batch + 1) % 25 == 0:
+            step = (epoch - 1) * n_batches + actual_batch
             current_lr = scheduler.get_last_lr()[0]
             wandb_run.log({
                 "train/loss": loss.item(),
@@ -233,28 +237,28 @@ def train_epoch(
             }, step=step)
 
         # Progress every 25 batches
-        if (batch_idx + 1) % 25 == 0:
+        if (actual_batch + 1) % 25 == 0:
             elapsed = time.time() - start_time
-            avg_loss = total_loss / (batch_idx + 1)
-            speed = (batch_idx + 1) / elapsed
+            avg_loss = total_loss / n_trained
+            speed = n_trained / elapsed
             logger.info(
-                f"Epoch {epoch:3d} | Batch {batch_idx+1:4d}/{n_batches} | "
+                f"Epoch {epoch:3d} | Batch {actual_batch+1:4d}/{n_batches} | "
                 f"Loss: {avg_loss:.4f} ({torch.rad2deg(torch.tensor(avg_loss)):.1f} deg) | "
                 f"{speed:.1f} b/s"
             )
 
         # Mid-epoch validation
-        if val_loader is not None and val_interval is not None and (batch_idx + 1) % val_interval == 0:
+        if val_loader is not None and val_interval is not None and (actual_batch + 1) % val_interval == 0:
             val_loss = validate(model, val_loader, device, config)
             val_deg = torch.rad2deg(torch.tensor(val_loss)).item()
             logger.info(
-                f"Epoch {epoch:3d} | Mid-epoch val @ batch {batch_idx+1}/{n_batches} | "
+                f"Epoch {epoch:3d} | Mid-epoch val @ batch {actual_batch+1}/{n_batches} | "
                 f"Val: {val_loss:.4f} ({val_deg:.1f} deg)"
             )
 
             # Log to wandb
             if wandb_run is not None:
-                step = (epoch - 1) * n_batches + batch_idx
+                step = (epoch - 1) * n_batches + actual_batch
                 wandb_run.log({
                     "val/loss": val_loss,
                     "val/loss_deg": val_deg,
@@ -266,11 +270,13 @@ def train_epoch(
                 checkpoint_path = checkpoint_dir / "best.pt"
                 torch.save({
                     'epoch': epoch,
+                    'batch_idx': actual_batch,
                     'model': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'scheduler': scheduler.state_dict(),
-                    'train_loss': total_loss / (batch_idx + 1),
+                    'train_loss': total_loss / n_trained,
                     'val_loss': val_loss,
+                    'best_loss': best_loss,
                     'config': config,
                 }, checkpoint_path)
                 logger.info(f"Saved best model (val_loss: {val_deg:.1f} deg)")
@@ -278,7 +284,7 @@ def train_epoch(
             # Switch back to training mode
             model.train()
 
-    return total_loss / n_batches, best_loss
+    return total_loss / n_trained if n_trained > 0 else 0.0, best_loss
 
 
 def validate(model: nn.Module, loader: DataLoader, device: str, config: dict) -> float:
@@ -357,13 +363,13 @@ def main():
     if 'val_batches' in config['data']:
         val_batch_range = tuple(config['data']['val_batches'])
 
-    loader = create_dataloader(config, geometry, batch_range=train_batch_range)
+    loader, train_sampler = create_dataloader(config, geometry, batch_range=train_batch_range)
     logger.info(f"Training: {len(loader.dataset):,} events, {len(loader):,} batches, bs={config['training']['batch_size']}")
 
     # Create validation dataloader
     val_loader = None
     if val_batch_range is not None:
-        val_loader = create_dataloader(
+        val_loader, _ = create_dataloader(
             config, geometry,
             batch_range=val_batch_range,
             max_events=config['data'].get('val_events'),
@@ -399,15 +405,25 @@ def main():
     # Resume from checkpoint if provided
     start_epoch = 1
     best_loss = float('inf')
+    resume_batch = 0
     resume_path = config['checkpoint'].get('resume')
     if resume_path and Path(resume_path).exists():
         checkpoint = torch.load(resume_path)
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
-        start_epoch = checkpoint['epoch'] + 1
-        best_loss = checkpoint.get('val_loss', float('inf'))
-        logger.info(f"Resumed from epoch {start_epoch-1}")
+        best_loss = checkpoint.get('best_loss', checkpoint.get('val_loss', float('inf')))
+
+        resume_batch_idx = checkpoint.get('batch_idx')
+        if resume_batch_idx is not None:
+            # Mid-epoch resume: restart same epoch, skip processed batches
+            start_epoch = checkpoint['epoch']
+            resume_batch = resume_batch_idx + 1
+            logger.info(f"Resumed mid-epoch {start_epoch} from batch {resume_batch_idx}, skipping {resume_batch} batches")
+        else:
+            # End-of-epoch resume: start next epoch
+            start_epoch = checkpoint['epoch'] + 1
+            logger.info(f"Resumed from epoch {start_epoch-1}")
 
     # Determine validation interval for mid-epoch validation
     val_per_epoch = config['data'].get('val_per_epoch', 1)
@@ -432,6 +448,10 @@ def main():
     effective_val_loader = val_loader if val_loader is not None else loader
 
     for epoch in range(start_epoch, config['training']['epochs'] + 1):
+        # Set sampler epoch for deterministic shuffling + optional skip
+        skip_batches = resume_batch if epoch == start_epoch and resume_batch > 0 else 0
+        train_sampler.set_epoch(epoch, skip_batches=skip_batches, batch_size=config['training']['batch_size'])
+
         # Train (scheduler steps per-batch inside train_epoch)
         train_loss, best_loss = train_epoch(
             model, loader, optimizer, scaler, scheduler, device, epoch, config, wandb_run,
@@ -439,6 +459,7 @@ def main():
             val_interval=val_interval,
             best_loss=best_loss,
             checkpoint_dir=run_checkpoint_dir,
+            start_batch=skip_batches,
         )
 
         # End-of-epoch validation
@@ -475,11 +496,13 @@ def main():
             checkpoint_path = run_checkpoint_dir / "best.pt"
             torch.save({
                 'epoch': epoch,
+                'batch_idx': None,
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
                 'train_loss': train_loss,
                 'val_loss': val_loss,
+                'best_loss': best_loss,
                 'config': config,
             }, checkpoint_path)
             logger.info(f"Saved best model (val_loss: {val_deg:.1f} deg)")
@@ -490,11 +513,13 @@ def main():
             latest_path = run_checkpoint_dir / f"epoch_{epoch:03d}.pt"
             torch.save({
                 'epoch': epoch,
+                'batch_idx': None,
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
                 'train_loss': train_loss,
                 'val_loss': val_loss,
+                'best_loss': best_loss,
                 'config': config,
             }, latest_path)
 
