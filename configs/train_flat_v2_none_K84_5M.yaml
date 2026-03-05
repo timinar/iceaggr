@@ -1,0 +1,50 @@
+# v2 none K=84 scaled to ~5M params
+#
+# Maxes out pulse capacity: input_dim = 4 + 3*84 = 256 = d_model.
+# No zero-padding waste compared to K=41 (which wastes 129 dims).
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+training:
+  epochs: 10
+  batch_size: 4096
+  lr: 3e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  max_events: 200000000
+  val_events: 50000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-none-K84-5M-proper-split-10ep
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - input-none
+    - scale-up
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: null

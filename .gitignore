@@ -212,6 +212,8 @@ logs/
 checkpoints/
 *.png
 *.pdf
+*.parquet
+lightning_logs/
 
 # Personal notes and experiments (keep local)
 personal_notes/
