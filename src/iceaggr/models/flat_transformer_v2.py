@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 
 
 from .directional_head import DirectionalHead
+from .vmf_loss import VMFMixtureHead, VMFMixtureLoss, vmf_weighted_mean
 
 
 def rms_norm(x: torch.Tensor) -> torch.Tensor:
@@ -168,11 +169,29 @@ class FlatTransformerV2(nn.Module):
             for _ in range(num_layers)
         ])
 
-        # Direction prediction head
-        self.direction_head = DirectionalHead(
-            embed_dim=self.d_model,
-            hidden_dim=config.get('head_hidden_dim', 128),
-        )
+        # Output head: directional or vMF mixture (default mixture=1)
+        self.head_type = config.get('head_type', 'directional')
+        if self.head_type == 'directional':
+            self.direction_head = DirectionalHead(
+                embed_dim=self.d_model,
+                hidden_dim=config.get('head_hidden_dim', 128),
+            )
+            self.vmf_head = None
+            self.vmf_loss = None
+        elif self.head_type == 'vmf':
+            self.direction_head = None
+            self.vmf_head = VMFMixtureHead(
+                d_model=self.d_model,
+                hidden_dim=config.get('head_hidden_dim', 128),
+                n_components=config.get('vmf_components', 1),
+            )
+            self.vmf_loss = VMFMixtureLoss(
+                kappa_min=config.get('vmf_kappa_min', 1.0),
+                kappa_max=config.get('vmf_kappa_max', 500.0),
+                kappa_reg=config.get('vmf_kappa_reg', 1e-4),
+            )
+        else:
+            raise ValueError(f"Unsupported head_type: {self.head_type}")
 
         self._init_weights()
 
@@ -212,7 +231,8 @@ class FlatTransformerV2(nn.Module):
         self,
         dom_vectors: torch.Tensor,
         padding_mask: torch.Tensor,
-    ) -> torch.Tensor:
+        target: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
         """
         Forward pass.
 
@@ -253,5 +273,25 @@ class FlatTransformerV2(nn.Module):
         # Final norm
         x = rms_norm(x)
 
-        # CLS token → direction
-        return self.direction_head(x[:, 0, :])
+        # CLS token embedding
+        embedding = x[:, 0, :]
+
+        if self.head_type == 'directional':
+            direction = self.direction_head(embedding)
+            return {'direction': direction, 'embedding': embedding}
+
+        # vMF mixture head path
+        mu, raw_kappa, log_weights = self.vmf_head(embedding)
+        direction = vmf_weighted_mean(mu, raw_kappa, log_weights)
+        out = {
+            'mu': mu,
+            'raw_kappa': raw_kappa,
+            'log_weights': log_weights,
+            'direction': direction,
+            'embedding': embedding,
+        }
+
+        if target is not None and self.vmf_loss is not None:
+            out['loss'] = self.vmf_loss(mu, raw_kappa, log_weights, target)
+
+        return out
