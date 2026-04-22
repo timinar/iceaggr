@@ -38,7 +38,12 @@ from iceaggr.data import (
     make_collate_flat,
     BatchAwareSampler,
 )
-from iceaggr.models import FlatTransformerModel, FlatTransformerV2, angular_distance_loss
+from iceaggr.models import (
+    FlatTransformerModel,
+    FlatTransformerV2,
+    angular_distance_loss,
+    angles_to_unit_vector,
+)
 from iceaggr.utils import get_logger
 
 logger = get_logger(__name__)
@@ -107,8 +112,20 @@ def create_model(config: dict, device: str) -> nn.Module:
     version = config['model'].get('version', 'v1')
     if version == 'v2':
         model_config['input_mode'] = config['model'].get('input_mode', 'mlp')
+        for key in (
+            'head_type',
+            'vmf_components',
+            'vmf_kappa_min',
+            'vmf_kappa_max',
+            'vmf_kappa_reg',
+        ):
+            if key in config['model']:
+                model_config[key] = config['model'][key]
         model = FlatTransformerV2(model_config)
-        logger.info(f"Using FlatTransformerV2 (input_mode={model_config['input_mode']})")
+        head_type = model_config.get('head_type', 'directional')
+        logger.info(
+            f"Using FlatTransformerV2 (input_mode={model_config['input_mode']}, head={head_type})"
+        )
     else:
         model = FlatTransformerModel(model_config)
         logger.info("Using FlatTransformerModel (v1)")
@@ -197,6 +214,7 @@ def train_epoch(
     total_loss = 0.0
     n_batches = len(loader)
     start_time = time.time()
+    head_type = config['model'].get('head_type', 'directional')
 
     for batch_idx, batch in enumerate(loader):
         dom_vectors = batch['dom_vectors'].to(device)
@@ -207,8 +225,14 @@ def train_epoch(
 
         # Forward with AMP
         with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=config['training']['use_amp']):
-            y_pred = model(dom_vectors, padding_mask)
-            loss = angular_distance_loss(y_pred, targets)
+            if head_type == 'vmf':
+                target_unit = angles_to_unit_vector(targets[:, 0], targets[:, 1])
+                outputs = model(dom_vectors, padding_mask, target=target_unit)
+                loss = outputs['loss']
+            else:
+                outputs = model(dom_vectors, padding_mask)
+                y_pred = outputs['direction'] if isinstance(outputs, dict) else outputs
+                loss = angular_distance_loss(y_pred, targets)
 
         # Backward with gradient scaling
         scaler.scale(loss).backward()
@@ -226,30 +250,37 @@ def train_epoch(
         if wandb_run is not None and (batch_idx + 1) % 25 == 0:
             step = (epoch - 1) * n_batches + batch_idx
             current_lr = scheduler.get_last_lr()[0]
-            wandb_run.log({
+            log_payload = {
                 "train/loss": loss.item(),
-                "train/loss_deg": torch.rad2deg(torch.tensor(loss.item())).item(),
                 "train/lr": current_lr,
-            }, step=step)
+            }
+            if head_type != 'vmf':
+                log_payload["train/loss_deg"] = torch.rad2deg(torch.tensor(loss.item())).item()
+            wandb_run.log(log_payload, step=step)
 
         # Progress every 25 batches
         if (batch_idx + 1) % 25 == 0:
             elapsed = time.time() - start_time
             avg_loss = total_loss / (batch_idx + 1)
             speed = (batch_idx + 1) / elapsed
+            if head_type == 'vmf':
+                loss_str = f"NLL: {avg_loss:.4f}"
+            else:
+                loss_str = f"Loss: {avg_loss:.4f} ({torch.rad2deg(torch.tensor(avg_loss)):.1f} deg)"
             logger.info(
                 f"Epoch {epoch:3d} | Batch {batch_idx+1:4d}/{n_batches} | "
-                f"Loss: {avg_loss:.4f} ({torch.rad2deg(torch.tensor(avg_loss)):.1f} deg) | "
-                f"{speed:.1f} b/s"
+                f"{loss_str} | {speed:.1f} b/s"
             )
 
         # Mid-epoch validation
         if val_loader is not None and val_interval is not None and (batch_idx + 1) % val_interval == 0:
-            val_loss = validate(model, val_loader, device, config)
-            val_deg = torch.rad2deg(torch.tensor(val_loss)).item()
+            val_metrics = validate(model, val_loader, device, config)
+            val_loss = val_metrics['loss']
+            val_ang_err = val_metrics['angular_error_rad']
+            val_ang_deg = torch.rad2deg(torch.tensor(val_ang_err)).item()
             logger.info(
                 f"Epoch {epoch:3d} | Mid-epoch val @ batch {batch_idx+1}/{n_batches} | "
-                f"Val: {val_loss:.4f} ({val_deg:.1f} deg)"
+                f"Val loss: {val_loss:.4f} | Angular err: {val_ang_deg:.2f} deg"
             )
 
             # Log to wandb
@@ -257,10 +288,11 @@ def train_epoch(
                 step = (epoch - 1) * n_batches + batch_idx
                 wandb_run.log({
                     "val/loss": val_loss,
-                    "val/loss_deg": val_deg,
+                    "val/angular_error_rad": val_ang_err,
+                    "val/angular_error_deg": val_ang_deg,
                 }, step=step)
 
-            # Save best model checkpoint
+            # Save best model checkpoint (by training-objective loss)
             if val_loss < best_loss and checkpoint_dir is not None:
                 best_loss = val_loss
                 checkpoint_path = checkpoint_dir / "best_flat_model.pt"
@@ -271,9 +303,10 @@ def train_epoch(
                     'scheduler': scheduler.state_dict(),
                     'train_loss': total_loss / (batch_idx + 1),
                     'val_loss': val_loss,
+                    'val_angular_error_rad': val_ang_err,
                     'config': config,
                 }, checkpoint_path)
-                logger.info(f"Saved best model (val_loss: {val_deg:.1f} deg)")
+                logger.info(f"Saved best model (val angular err: {val_ang_deg:.2f} deg)")
 
             # Switch back to training mode
             model.train()
@@ -281,12 +314,19 @@ def train_epoch(
     return total_loss / n_batches, best_loss
 
 
-def validate(model: nn.Module, loader: DataLoader, device: str, config: dict) -> float:
-    """Validate on the full validation set."""
+def validate(model: nn.Module, loader: DataLoader, device: str, config: dict) -> dict:
+    """Validate on the full validation set.
+
+    Returns:
+        {'loss': training-objective loss, 'angular_error_rad': mean angular error}
+        For the directional head these are identical; for vMF they differ.
+    """
     model.eval()
 
     total_loss = 0.0
+    total_ang_err = 0.0
     n_batches = 0
+    head_type = config['model'].get('head_type', 'directional')
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
@@ -295,13 +335,27 @@ def validate(model: nn.Module, loader: DataLoader, device: str, config: dict) ->
             targets = batch['targets'].to(device)
 
             with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=config['training']['use_amp']):
-                y_pred = model(dom_vectors, padding_mask)
-                loss = angular_distance_loss(y_pred, targets)
+                if head_type == 'vmf':
+                    target_unit = angles_to_unit_vector(targets[:, 0], targets[:, 1])
+                    outputs = model(dom_vectors, padding_mask, target=target_unit)
+                    loss = outputs['loss']
+                    ang_err = angular_distance_loss(outputs['direction'], targets)
+                else:
+                    outputs = model(dom_vectors, padding_mask)
+                    y_pred = outputs['direction'] if isinstance(outputs, dict) else outputs
+                    loss = angular_distance_loss(y_pred, targets)
+                    ang_err = loss
 
             total_loss += loss.item()
+            total_ang_err += ang_err.item()
             n_batches += 1
 
-    return total_loss / n_batches if n_batches > 0 else 0.0
+    if n_batches == 0:
+        return {'loss': 0.0, 'angular_error_rad': 0.0}
+    return {
+        'loss': total_loss / n_batches,
+        'angular_error_rad': total_ang_err / n_batches,
+    }
 
 
 def main():
@@ -427,19 +481,21 @@ def main():
         )
 
         # End-of-epoch validation
-        val_loss = validate(model, effective_val_loader, device, config)
+        val_metrics = validate(model, effective_val_loader, device, config)
+        val_loss = val_metrics['loss']
+        val_ang_err = val_metrics['angular_error_rad']
 
         # Get current LR (scheduler already stepped per-batch)
         current_lr = scheduler.get_last_lr()[0]
 
         # Log epoch summary
         train_deg = torch.rad2deg(torch.tensor(train_loss)).item()
-        val_deg = torch.rad2deg(torch.tensor(val_loss)).item()
+        val_ang_deg = torch.rad2deg(torch.tensor(val_ang_err)).item()
 
         logger.info(
             f"Epoch {epoch:3d} done | "
-            f"Train: {train_loss:.4f} ({train_deg:.1f} deg) | "
-            f"Val: {val_loss:.4f} ({val_deg:.1f} deg) | "
+            f"Train: {train_loss:.4f} | "
+            f"Val loss: {val_loss:.4f} | Angular err: {val_ang_deg:.2f} deg | "
             f"LR: {current_lr:.2e}"
         )
 
@@ -450,7 +506,8 @@ def main():
                 "train/epoch_loss": train_loss,
                 "train/epoch_loss_deg": train_deg,
                 "val/loss": val_loss,
-                "val/loss_deg": val_deg,
+                "val/angular_error_rad": val_ang_err,
+                "val/angular_error_deg": val_ang_deg,
                 "lr": current_lr,
             })
 
@@ -465,9 +522,10 @@ def main():
                 'scheduler': scheduler.state_dict(),
                 'train_loss': train_loss,
                 'val_loss': val_loss,
+                'val_angular_error_rad': val_ang_err,
                 'config': config,
             }, checkpoint_path)
-            logger.info(f"Saved best model (val_loss: {val_deg:.1f} deg)")
+            logger.info(f"Saved best model (val angular err: {val_ang_deg:.2f} deg)")
 
         # Save periodic checkpoint
         save_every = config['checkpoint'].get('save_every', 5)
@@ -480,10 +538,15 @@ def main():
                 'scheduler': scheduler.state_dict(),
                 'train_loss': train_loss,
                 'val_loss': val_loss,
+                'val_angular_error_rad': val_ang_err,
                 'config': config,
             }, latest_path)
 
-    logger.info(f"Training complete. Best val loss: {torch.rad2deg(torch.tensor(best_loss)):.1f} deg")
+    head_type = config['model'].get('head_type', 'directional')
+    if head_type == 'vmf':
+        logger.info(f"Training complete. Best val loss (NLL): {best_loss:.4f}")
+    else:
+        logger.info(f"Training complete. Best val loss: {torch.rad2deg(torch.tensor(best_loss)):.1f} deg")
 
     if wandb_run is not None:
         wandb_run.finish()
