@@ -1,292 +1,103 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Project-specific context for working in this repository. The [README](README.md) covers what the project is and how to run it — this file captures conventions, data layout, and gotchas that aren't obvious from the code alone.
 
-## Project Overview
+## Architecture in one paragraph
 
-**iceaggr** is a research project developing transformer models for precise angular reconstruction of high-energy neutrino events in IceCube. The model predicts neutrino direction (azimuth, zenith) from photomultiplier pulse data across ~5000 Digital Optical Modules (DOMs).
+One flat transformer over **DOM vectors**. For every active DOM, the first K=84 pulses (time/charge/aux triplets) are concatenated into a single fixed-length vector and prepended with `[x, y, z, n_pulses]`. The event becomes a short sequence of such vectors plus a CLS token, processed by a single nanochat-style transformer (RMSNorm, QK-norm, ReLU², zero-init proj). The CLS embedding drives either a directional head (angular-distance loss) or a **vMF mixture head** (NLL, κ-weighted mean direction for point estimates).
 
-### Core Architecture Concept
+This is intentionally *not* hierarchical — there is no per-DOM inner transformer. Concatenation collapses the pulse axis before attention, saving ~K× in sequence length vs. a naive two-stage model. Any references to "T1 / T2 / hierarchical" in old notes or `archive/configs/` describe a deprecated architecture.
 
-The project uses a **flat transformer** approach (`FlatTransformerV2`, ~5-10M params, achieves 55-56° angular error):
+Main files: [src/iceaggr/models/flat_transformer_v2.py](src/iceaggr/models/flat_transformer_v2.py), [src/iceaggr/models/vmf_loss.py](src/iceaggr/models/vmf_loss.py), [src/iceaggr/models/losses.py](src/iceaggr/models/losses.py), [scripts/train_flat.py](scripts/train_flat.py).
 
-1. **DOM-level aggregation**: For each DOM, concatenate the first K pulse features (time, charge, auxiliary flag) into a fixed-length vector, prepend geometry (x,y,z) and pulse count
-2. **Single transformer**: Process all DOM vectors with a standard transformer (RMSNorm, QK-norm attention, ReLU² FFN, residual scaling)
-3. **CLS token**: Prepended learnable token; its output embedding is fed to a directional head that predicts unit vector → (azimuth, zenith)
+## Data paths
 
-Key design choices (nanochat/GPT-inspired):
-- Functional RMSNorm, no learnable norm params
-- Zero-init output projections (attention c_proj, FFN c_proj)
-- Per-layer residual scaling + skip connection to initial embedding
-- Configurable input projection: none / linear / MLP
+All data lives at `/groups/pheno/inar/icecube_kaggle/`. User-local paths belong in [src/iceaggr/data/data_config.yaml](src/iceaggr/data/data_config.yaml) (gitignored) — **do not hard-code paths in scripts**.
 
-### Key Technical Challenges
+| Path | What |
+|---|---|
+| `train/batch_*.parquet` | Pulse data, ~20GB compressed |
+| `train_meta/train_meta_*.parquet` | `event_id, first_pulse_index, last_pulse_index, azimuth, zenith` |
+| `sensor_geometry_normalized.csv` | DOM positions divided by 500 (use this one) |
+| `sensor_geometry.csv` | Raw DOM positions |
+| `ice_transparency.txt` | Ice optical properties |
 
-- **DOM subsampling**: Events can have up to ~2000 active DOMs; max_doms parameter limits sequence length (default: 128, selected by earliest arrival time)
-- **Pulse truncation**: Each DOM keeps first K pulses (K=16-84); remaining are discarded
-- **Loss function**: Angular distance loss on unit vectors (great-circle distance)
+### Train/val split convention
 
-## Development Setup
+- Ours: train = batches **1–650**, val = batches **651–655**
+- 2nd-place (DrHB) used batches 655–659 as their val
+- Batches **656–659** are unseen by both → best set for head-to-head comparison
 
-This project uses **UV** (modern Python package manager) for all dependency management.
+## Data quirks worth remembering
 
-### Essential Commands
+- 50–70% of DOMs have ≤10 pulses (sparse tail). Truncating to K=84 is cheap.
+- 99th percentile: <2000 active DOMs per event; `max_doms=128` covers the vast majority (selection is by earliest pulse time).
+- Heavy tail: rare events have 10K+ pulses. The flat architecture handles these via DOM truncation, no special path needed.
+- **Use Polars or PyArrow, not pandas.** IceCube parquets are large; pandas is 10–100× slower and eats memory. Exception: tiny result tables (<1K rows) are fine in pandas.
 
-```bash
-# Install/sync all dependencies (run after pulling changes)
-uv sync
+## Configuration pattern
 
-# Add new package
-uv add package-name          # For main dependencies
-uv add --dev package-name    # For dev tools only
+Two tiers:
 
-# Update all packages
-uv sync --upgrade
-```
+1. **Data paths** → [src/iceaggr/data/data_config.yaml](src/iceaggr/data/data_config.yaml), gitignored, local per user.
+2. **Experiments** → [configs/](configs/), committed. Naming: `train_flat_v2_<input_mode>_K<K>_<size>[_<variant>].yaml`.
 
-### Running Code
-
-```bash
-# Run Python scripts
-uv run python scripts/script_name.py
-
-# Start Jupyter Lab for notebooks (automatically uses correct Python kernel)
-uv run jupyter lab
-
-# IMPORTANT: In notebooks, the iceaggr package is available after running `uv sync`
-# The kernel "Python 3 (ipykernel)" uses the UV environment automatically
-
-# Run tests
-uv run pytest                    # All tests
-uv run pytest tests/unit/        # Unit tests only
-uv run pytest tests/integration/ # Integration tests only
-uv run pytest --cov=src/iceaggr  # With coverage
-
-# Code quality
-uv run ruff format .             # Format code
-uv run ruff check .              # Check for issues
-uv run ruff check . --fix        # Auto-fix issues
-uv run mypy src/                 # Type checking
-```
-
-## Project Structure
-
-```
-iceaggr/
-├── src/iceaggr/              # Main code (importable package)
-│   ├── data/                # DataLoaders, collators, geometry ✓
-│   ├── models/              # Flat transformer, losses, directional head ✓
-│   │   ├── flat_transformer_v2.py  # Main model (FlatTransformerV2)
-│   │   ├── flat_transformer.py     # V1 flat model (FlatTransformerModel)
-│   │   ├── event_transformer.py    # TransformerBlock (used by v1)
-│   │   ├── directional_head.py     # Unit vector → angles prediction
-│   │   └── losses.py               # Angular distance loss
-│   ├── training/            # (placeholder, training is in scripts/)
-│   └── utils/               # Logging utilities ✓
-├── configs/                 # Flat transformer training configs ✓
-│   └── train_flat_v2_*.yaml # Various model size/input projection configs
-├── archive/configs/         # Old hierarchical model configs (preserved)
-├── notes/                   # Design documentation (committed) ✓
-├── scripts/                 # Training and analysis scripts ✓
-│   └── train_flat.py        # Main training script
-├── notebooks/               # Jupyter notebooks for experiments
-├── tests/                   # Unit and integration tests ✓
-├── src/iceaggr/data/data_config.yaml         # Local data paths (gitignored) ✓
-├── src/iceaggr/data/data_config.template.yaml # Template for data paths ✓
-└── pyproject.toml           # Dependencies and project config ✓
-```
-
-**Current state**: Flat transformer trained and achieving 55-56° angular error. Data loading, model, and training pipeline all functional.
-
-## Configuration Management
-
-The project uses a simple two-tier config approach:
-
-1. **Data paths** (`src/iceaggr/data/data_config.yaml` in root):
-   - Gitignored, local to each user
-   - Contains **only data paths** (train, test directories)
-   - Copy from `src/iceaggr/data/data_config.template.yaml` and modify
-   - Example:
-     ```yaml
-     data:
-       root: /path/to/icecube_kaggle
-       train: /path/to/icecube_kaggle/train
-       test: /path/to/icecube_kaggle/test
-       batch_pattern: "batch_*.parquet"
-     ```
-
-2. **Experiment configs** (`configs/` directory - to be created):
-   - Committed to git
-   - Model architectures, training params, logging settings
-   - Organized by experiment type
-
-Load data config in code:
+Load data config:
 ```python
 import yaml
-
 with open("src/iceaggr/data/data_config.yaml") as f:
-    config = yaml.safe_load(f)
-
-train_path = config["data"]["train"]
+    paths = yaml.safe_load(f)["data"]
 ```
 
-**Important**: All scripts should use `src/iceaggr/data/data_config.yaml` for data paths, not hardcoded paths!
+## Checkpoint format
 
-## Data Architecture
-
-### IceCube Dataset Structure
-
-- **Location**: `/groups/pheno/inar/icecube_kaggle/train/`
-- **Format**: Parquet files (`batch_*.parquet`)
-- **Size**: ~20GB compressed total
-
-### Key Data Characteristics (from pulse analysis)
-
-Based on analysis in [scripts/2029_09_08_pulse_statistics.py](scripts/2029_09_08_pulse_statistics.py):
-
-- **DOMs per event**:
-  - Median: varies by batch
-  - 99th percentile: <2000 DOMs (manageable for T2)
-  - Max: 5160 DOMs (full detector)
-
-- **Pulses per DOM** (critical for T1 design):
-  - 50-70% of DOMs have ≤10 pulses (sparse, lightweight path needed)
-  - 99th percentile: determines max sequence length for T1
-  - Heavy tail: Some DOMs have 1000s of pulses (need chunking/windowed attention)
-
-- **Event sizes**:
-  - Most events: <1K total pulses
-  - Large events: 1K-10K pulses
-  - Extreme outliers: >100K pulses (need special handling)
-
-### Batching Strategy Considerations
-
-The analysis script recommends either:
-- **Option 2**: Grouped batch processing (if data is well-behaved)
-- **Option 3**: Continuous/flattened batching with FlexAttention (for heavy-tailed distributions)
-
-Choice depends on specific data distribution - run pulse statistics first.
-
-## Experiment Tracking
-
-### Weights & Biases Integration
+Training wraps the model with `torch.compile`, so `state_dict` keys have an `_orig_mod.` prefix. Inference scripts must strip it:
 
 ```python
-import wandb
-
-# Initialize experiment
-wandb.init(
-    project="iceaggr",
-    name="component-description-version-yourname",
-    tags=["component-type", "experiment-type"]
-)
-
-# Example names:
-# - "dom-transformer-baseline-v1-alice"
-# - "event-transformer-geom-v2-bob"
-
-# Log during training
-wandb.log({"loss": loss, "angular_error": angular_err})
+ckpt = torch.load(path)
+state = {k.removeprefix("_orig_mod."): v for k, v in ckpt["model"].items()}
 ```
 
-### Naming Conventions
+Current best: `checkpoints/v2-none-K84-5M-proper-split-10ep/best.pt` (val loss 0.968 rad ≈ 55.5° mean, 48° median). vMF run in progress as of 2026-04-22.
 
-- **Branches**:
-  - `experiment/transformer-attention`
-  - `feature/data-loader-improvements`
-  - `bugfix/memory-leak-training`
-
-- **W&B runs**: `component-description-version-yourname`
-- **Tags**: `["dom-level" | "event-level" | "e2e", experiment-type, yourname]`
-
-## Important Data Insights
-
-From the data analysis, keep in mind:
-
-1. **Most events are sparse**: 99% of events activate <5% of the detector
-2. **DOM-level sparsity**: Median pulses per DOM is very low (often <5)
-3. **Memory planning**: Batch size 32 at 99th percentile events is manageable, but worst-case can OOM
-4. **Special handling needed**: Events >100K pulses may need reservoir sampling or splitting
+Keys in checkpoint dicts: `model`, `optimizer`, `scheduler`, `epoch`, `batch_idx` (nullable — mid-epoch resume), `train_loss`, `val_loss`, `val_angular_error_rad`, `best_loss`, `config`.
 
 ## Logging
 
-Use the project's color-coded logger for consistent output:
+Use the project's color-coded logger rather than `print`:
 
 ```python
 from iceaggr.utils import get_logger
-
 logger = get_logger(__name__)
 logger.info("Loading batch 42")
-logger.debug("Batch shape: (32, 128, 4)")
-logger.warning("Cache miss for batch 99")
-logger.error("Failed to load data")
 ```
 
-**Log levels**: DEBUG (blue), INFO (green), WARNING (yellow), ERROR (red)
+Levels: DEBUG (blue), INFO (green), WARNING (yellow), ERROR (red). See [src/iceaggr/utils/logger_config.py](src/iceaggr/utils/logger_config.py).
 
-**Change level**: `get_logger(__name__, level=logging.DEBUG)`
+## wandb
 
-See `src/iceaggr/utils/logger_config.py` for implementation. Original by [Midori Kato](https://github.com/pomidori).
-
-## Development Workflow
-
-1. **Always start with**: `git checkout main && git pull && uv sync`
-2. **Create descriptive branches**: Use prefixes experiment/feature/bugfix/analysis
-3. **Test before committing**: Run `uv run pytest && uv run ruff check .`
-4. **Commit with context**: Explain why, not just what
-5. **Track experiments**: Use W&B for all training runs
-6. **Use logging**: Replace `print()` with `logger.info()` in all code
-
-## Key Technologies
-
-- **PyTorch**: Deep learning framework
-- **PyTorch Lightning**: Training framework
-- **Polars / PyArrow**: Fast dataframe operations for analysis (NOT pandas - too slow!)
-- **UV**: Python package and environment manager
-- **Weights & Biases**: Experiment tracking
-- **Ruff**: Code formatting and linting
-
-## Data Analysis Best Practices
-
-**IMPORTANT**: Avoid pandas for large-scale data analysis. Use Polars or PyArrow instead.
+Always log `val/angular_error_rad` and `val/angular_error_deg` — these are comparable across loss types (angular-distance vs. vMF NLL), and `val/loss` alone is not.
 
 ```python
-# ✅ GOOD: Use Polars for dataframes
-import polars as pl
-df = pl.read_parquet("data.parquet")
-df = df.filter(pl.col("value") > 10)
-
-# ✅ GOOD: Use PyArrow for columnar data
-import pyarrow.parquet as pq
-table = pq.read_table("data.parquet")
-
-# ❌ BAD: Avoid pandas (10-100x slower)
-import pandas as pd  # Don't use this!
+wandb.init(project="iceaggr", name="v2-<variant>-<size>-<yourname>")
 ```
 
-**Why?**
-- Polars is 10-100x faster than pandas
-- PyArrow has zero-copy operations
-- IceCube data is large (~20GB) - pandas will be painfully slow
-- Polars has better memory efficiency
-
-**When to use pandas**: Only for small results tables (<1000 rows) or final output formatting
-
-## Git Configuration Notes
-
-SSH access is configured for this repository. If setting up on new system:
+## Dev workflow
 
 ```bash
-ssh-keygen -t ed25519 -C "your.email@example.com"
-cat ~/.ssh/id_ed25519.pub  # Add to GitHub Settings → SSH keys
-ssh -T git@github.com      # Test connection
+git checkout main && git pull && uv sync      # always start here
+git checkout -b experiment/<short-name>        # or feature/, bugfix/, analysis/
+# work…
+uv run pytest && uv run ruff check .           # before pushing
 ```
 
-## Next Development Steps
+Commit messages explain *why*, not *what* (the diff shows the what).
 
-- [x] Dataloader implementation with DOM grouping
-- [x] Flat transformer model (FlatTransformerV2)
-- [x] End-to-end training pipeline (train_flat.py)
-- [x] Scale-up experiments (5M, 10M params)
-- [ ] Comparison with spline-mpe baseline
-- [ ] Paper figures and analysis
+## Next steps
+
+- [x] Dataloader with DOM grouping, flat collator
+- [x] FlatTransformerV2 + training pipeline
+- [x] 5M / 10M scale-up runs
+- [x] vMF mixture head + NLL training path
+- [ ] spline-mpe baseline comparison
+- [ ] Paper figures

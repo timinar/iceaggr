@@ -78,6 +78,9 @@ target/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Local analysis notebooks that depend on checkpoints / non-committed data
+notebooks/compare_2nd_place.ipynb
+
 # IPython
 profile_default/
 ipython_config.py
