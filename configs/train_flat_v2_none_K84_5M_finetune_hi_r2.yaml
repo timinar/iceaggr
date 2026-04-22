@@ -1,0 +1,59 @@
+# Fine-tune K84 5M on high-activity events — round 2
+#
+# Continues from the best checkpoint of round 1 (7.5° val).
+# Loss was still decreasing at epoch 10 with LR → 0, so more training warranted.
+#
+# Changes vs round 1:
+#   - batch_size: 512 → 1024  (H100 has 95 GB, round 1 used only ~21 GB)
+#   - epochs: 10 → 20
+#   - lr: 3e-5 (same max, fresh OneCycleLR schedule)
+#   - warmup_steps: 500 → 1000 (longer warmup for larger batch)
+#   - resume: best.pt from round 1
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 512
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+training:
+  epochs: 20
+  batch_size: 1024          # H100 has 95 GB; round-1 bs=512 used ~21 GB, bs=1024 ~44 GB
+  lr: 3e-5
+  warmup_steps: 1000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  min_pulses: 1000
+  max_events: 200000000
+  val_events: 50000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 635]
+  val_batches: [636, 660]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-none-K84-5M-finetune-hi1000-r2
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - finetune
+    - high-activity
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: checkpoints/v2-none-K84-5M-finetune-hi1000/best.pt
+  finetune: true            # load model weights only, fresh optimizer+scheduler
