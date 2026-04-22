@@ -52,6 +52,7 @@ class IceCubeDataset(Dataset):
         max_events: Optional[int] = None,
         cache_size: int = 1,
         batch_range: Optional[tuple] = None,
+        min_pulses: Optional[int] = None,
     ):
         assert split in ["train", "test"], f"split must be 'train' or 'test', got {split}"
 
@@ -78,6 +79,15 @@ class IceCubeDataset(Dataset):
             indices = np.where(mask)[0]
             self.metadata = self.metadata.take(indices)
             logger.info(f"Filtered to batch_id [{min_batch}, {max_batch}]: {len(self.metadata):,} events")
+
+        # Apply min_pulses BEFORE max_events so the count cap acts on the filtered set
+        if min_pulses is not None:
+            first = self.metadata.column("first_pulse_index").to_numpy()
+            last = self.metadata.column("last_pulse_index").to_numpy()
+            mask = (last - first + 1) >= min_pulses
+            indices = np.where(mask)[0]
+            self.metadata = self.metadata.take(indices)
+            logger.info(f"Filtered to min_pulses >= {min_pulses}: {len(self.metadata):,} events")
 
         if max_events is not None:
             self.metadata = self.metadata.slice(0, max_events)
