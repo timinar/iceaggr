@@ -82,6 +82,28 @@ Always log `val/angular_error_rad` and `val/angular_error_deg` — these are com
 wandb.init(project="iceaggr", name="v2-<variant>-<size>-<yourname>")
 ```
 
+## Repo layout beyond src/
+
+- [`paper/`](paper/) — **gitignored**; anything paper-specific lives here and stays out of the main repo:
+  - `paper/scripts/` — figure-generation and analysis (`paper_*` prefix, plus `failure_analysis.py`). These reach the iceaggr root via `PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))`.
+  - `paper/predictions/` — prediction parquets produced by `scripts/inference.py` and consumed by the paper scripts.
+  - `paper/working_notes/` — prose write-ups feeding the paper (notes 07+ live here, not in `notes/`).
+  - `paper/698db.../` — the Overleaf repo (synced externally).
+- [`notebooks/`](notebooks/) — often gitignored per-notebook when they load checkpoints or write to local paths (`notebooks/compare_2nd_place.ipynb` is explicitly listed in `.gitignore`).
+- [`archive/configs/`](archive/configs/) — superseded hierarchical-model configs, kept for reference only.
+
+**When moving files across this boundary**, grep for ALL references (`paper/scripts/*.py`, `notebooks/*.ipynb`, `*.md`) and update paths in the same session. Hardcoded absolute paths are common in `paper/` scripts.
+
+## Dependencies
+
+Minimize. Before adding anything to [`pyproject.toml`](pyproject.toml) (including dev-deps), grep for actual imports:
+
+```bash
+grep -rE "^import <pkg>|^from <pkg>" --include="*.py" .
+```
+
+If nothing imports it, don't add it. If the only imports live in `paper/` or `notebooks/` (both gitignored), the dep belongs in whatever environment runs THOSE — not in iceaggr's `pyproject.toml`.
+
 ## Dev workflow
 
 ```bash
@@ -92,6 +114,12 @@ uv run pytest && uv run ruff check .           # before pushing
 ```
 
 Commit messages explain *why*, not *what* (the diff shows the what).
+
+### PR strategy
+
+- Small, focused PRs. Trivial one-line fixes and docs refreshes may go direct to `main`.
+- When the working tree mixes multiple concerns, **triage into groups first** and confirm with the user which goes where (main / PR / paper repo / gitignore). Don't commit the blob.
+- When building a focused PR whose scope is narrower than your current working tree, **start from the target branch's file version and re-apply only the in-scope hunks** — never the mixed working copy.
 
 ## Next steps
 
