@@ -38,7 +38,12 @@ from iceaggr.data import (
     make_collate_flat,
     BatchAwareSampler,
 )
-from iceaggr.models import FlatTransformerModel, FlatTransformerV2, angular_distance_loss
+from iceaggr.models import (
+    FlatTransformerModel,
+    FlatTransformerV2,
+    angular_distance_loss,
+    angles_to_unit_vector,
+)
 from iceaggr.utils import get_logger
 
 logger = get_logger(__name__)
@@ -107,6 +112,15 @@ def create_model(config: dict, device: str) -> nn.Module:
     version = config['model'].get('version', 'v1')
     if version == 'v2':
         model_config['input_mode'] = config['model'].get('input_mode', 'mlp')
+        for key in (
+            'head_type',
+            'vmf_components',
+            'vmf_kappa_min',
+            'vmf_kappa_max',
+            'vmf_kappa_reg',
+        ):
+            if key in config['model']:
+                model_config[key] = config['model'][key]
         model = FlatTransformerV2(model_config)
         logger.info(f"Using FlatTransformerV2 (input_mode={model_config['input_mode']})")
     else:
@@ -197,6 +211,7 @@ def train_epoch(
     total_loss = 0.0
     n_batches = len(loader)
     start_time = time.time()
+    head_type = config['model'].get('head_type', 'directional')
 
     for batch_idx, batch in enumerate(loader):
         dom_vectors = batch['dom_vectors'].to(device)
@@ -207,8 +222,14 @@ def train_epoch(
 
         # Forward with AMP
         with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=config['training']['use_amp']):
-            y_pred = model(dom_vectors, padding_mask)
-            loss = angular_distance_loss(y_pred, targets)
+            if head_type == 'vmf':
+                target_unit = angles_to_unit_vector(targets[:, 0], targets[:, 1])
+                outputs = model(dom_vectors, padding_mask, target=target_unit)
+                loss = outputs['loss']
+            else:
+                outputs = model(dom_vectors, padding_mask)
+                y_pred = outputs['direction'] if isinstance(outputs, dict) else outputs
+                loss = angular_distance_loss(y_pred, targets)
 
         # Backward with gradient scaling
         scaler.scale(loss).backward()
@@ -287,6 +308,7 @@ def validate(model: nn.Module, loader: DataLoader, device: str, config: dict) ->
 
     total_loss = 0.0
     n_batches = 0
+    head_type = config['model'].get('head_type', 'directional')
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
@@ -295,8 +317,14 @@ def validate(model: nn.Module, loader: DataLoader, device: str, config: dict) ->
             targets = batch['targets'].to(device)
 
             with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=config['training']['use_amp']):
-                y_pred = model(dom_vectors, padding_mask)
-                loss = angular_distance_loss(y_pred, targets)
+                if head_type == 'vmf':
+                    target_unit = angles_to_unit_vector(targets[:, 0], targets[:, 1])
+                    outputs = model(dom_vectors, padding_mask, target=target_unit)
+                    loss = outputs['loss']
+                else:
+                    outputs = model(dom_vectors, padding_mask)
+                    y_pred = outputs['direction'] if isinstance(outputs, dict) else outputs
+                    loss = angular_distance_loss(y_pred, targets)
 
             total_loss += loss.item()
             n_batches += 1
