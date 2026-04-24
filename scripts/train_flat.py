@@ -166,6 +166,7 @@ def create_dataloader(
         max_events=max_events,
         cache_size=1,
         batch_range=batch_range,
+        min_pulses=config['data'].get('min_pulses'),
     )
 
     sampler = BatchAwareSampler(dataset.metadata)
@@ -447,11 +448,15 @@ def main():
     if resume_path and Path(resume_path).exists():
         checkpoint = torch.load(resume_path)
         model.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        scheduler.load_state_dict(checkpoint['scheduler'])
-        start_epoch = checkpoint['epoch'] + 1
-        best_loss = checkpoint.get('val_loss', float('inf'))
-        logger.info(f"Resumed from epoch {start_epoch-1}")
+        if config['checkpoint'].get('finetune', False):
+            # Fine-tune mode: load model weights only, start fresh optimizer+scheduler
+            logger.info("Fine-tune mode: loaded model weights only, fresh optimizer+scheduler")
+        else:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            scheduler.load_state_dict(checkpoint['scheduler'])
+            start_epoch = checkpoint['epoch'] + 1
+            best_loss = checkpoint.get('val_loss', float('inf'))
+            logger.info(f"Resumed from epoch {start_epoch-1}")
 
     # Determine validation interval for mid-epoch validation
     val_per_epoch = config['data'].get('val_per_epoch', 1)

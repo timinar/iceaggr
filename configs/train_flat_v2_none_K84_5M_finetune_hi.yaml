@@ -1,0 +1,59 @@
+# Fine-tune K84 5M on high-activity events (>= 1000 total pulses)
+#
+# Starts from the 10-epoch K84 checkpoint and continues training exclusively on
+# events with >= 1000 pulses (1.13% of dataset = ~1.46M events).
+#
+# DOM count distribution for >= 1000 pulse events (from analyze_high_activity_doms.py):
+#   P50=329, P75=508, P90=823, P95=1097, P99=1578, max=2533
+#
+# max_doms=512 chosen to match the GPU attention memory budget of the baseline
+# (baseline: 4096 events × 128² = 67M; here: 256 × 512² = 67M).
+# Covers ~P75 of high-activity events; the rest are truncated to 512 DOMs.
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 512
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+training:
+  epochs: 10
+  batch_size: 512           # H100 benchmark: ~21 GB, ~3150 events/s, ~2850 steps/epoch
+  lr: 3e-5                  # 10x lower than pretraining lr
+  warmup_steps: 500
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  min_pulses: 1000
+  max_events: 200000000
+  val_events: 50000          # caps to 50k high-activity val events (~25 batches × 2250)
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 635]    # 635 train batches (batches 636-660 reserved for val)
+  val_batches: [636, 660]    # 25 batches × ~2250 high-activity = ~56k, capped at 50k
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-none-K84-5M-finetune-hi1000
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - finetune
+    - high-activity
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: checkpoints/v2-none-K84-5M-proper-split-10ep/best.pt
+  finetune: true            # load model weights only, fresh optimizer+scheduler
