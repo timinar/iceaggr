@@ -38,7 +38,7 @@ class BatchAwareSampler(Sampler):
         metadata: PyArrow table with 'batch_id' column
     """
 
-    def __init__(self, metadata):
+    def __init__(self, metadata, seed=42):
         self.n_events = len(metadata)
         batch_ids = metadata.column("batch_id").to_numpy()
 
@@ -48,16 +48,41 @@ class BatchAwareSampler(Sampler):
             self.grouped_indices[batch_id].append(idx)
 
         self.batch_keys = list(self.grouped_indices.keys())
+        self.seed = seed
+        self.epoch = 0
+        self._skip_indices = 0
+
+    def set_epoch(self, epoch, skip_batches=0, batch_size=1):
+        """Set epoch for deterministic shuffling and optional batch skipping.
+
+        Args:
+            epoch: Current epoch number (determines shuffle order)
+            skip_batches: Number of batches to skip (for mid-epoch resume)
+            batch_size: DataLoader batch size (needed to compute indices to skip)
+        """
+        self.epoch = epoch
+        self._skip_indices = skip_batches * batch_size
 
     def __iter__(self) -> Iterator[int]:
-        # 1. Shuffle the order of batch files (epoch-level randomness)
-        random.shuffle(self.batch_keys)
+        rng = random.Random(self.seed + self.epoch)
+
+        # 1. Shuffle the order of batch files (deterministic per epoch)
+        batch_keys = self.batch_keys.copy()
+        rng.shuffle(batch_keys)
 
         # 2. For each batch file, shuffle events and yield them
-        for batch_key in self.batch_keys:
+        skipped = 0
+        for batch_key in batch_keys:
             indices_in_batch = self.grouped_indices[batch_key].copy()
-            random.shuffle(indices_in_batch)
-            yield from indices_in_batch
+            rng.shuffle(indices_in_batch)
+            if self._skip_indices == 0:
+                yield from indices_in_batch
+            else:
+                for idx in indices_in_batch:
+                    if skipped < self._skip_indices:
+                        skipped += 1
+                        continue
+                    yield idx
 
     def __len__(self) -> int:
         return self.n_events

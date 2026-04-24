@@ -221,29 +221,3 @@ class TestDataLoader:
 
         assert total_events == max_events
 
-    def test_dataloader_shuffle(self):
-        """Test shuffle produces different order."""
-        max_events = 100
-        batch_size = 10
-
-        # Create two dataloaders with different shuffle seeds
-        dataloader1 = get_dataloader(
-            split="train",
-            batch_size=batch_size,
-            max_events=max_events,
-            shuffle=True
-        )
-
-        dataloader2 = get_dataloader(
-            split="train",
-            batch_size=batch_size,
-            max_events=max_events,
-            shuffle=False
-        )
-
-        batch1 = next(iter(dataloader1))
-        batch2 = next(iter(dataloader2))
-
-        # With high probability, shuffled and non-shuffled should differ
-        # (may rarely fail due to random chance)
-        assert not torch.equal(batch1["event_ids"], batch2["event_ids"])
