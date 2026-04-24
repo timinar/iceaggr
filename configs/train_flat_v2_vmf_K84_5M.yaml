@@ -1,0 +1,58 @@
+# v2 none K=84 ~5M params with vMF mixture loss (K=3 components)
+#
+# Same backbone as train_flat_v2_none_K84_5M.yaml (directional head, 48° median).
+# Only the output head + loss change: K=3 vMF mixture trained via NLL.
+# val/angular_error_deg is logged for cross-run comparison with angular-loss runs.
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 700.0
+  vmf_kappa_reg: 1.0e-4
+
+training:
+  epochs: 10
+  batch_size: 4096
+  lr: 3e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  max_events: 200000000
+  val_events: 100000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-vmf-K84-5M-mix3-10ep
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - input-none
+    - vmf
+    - mixture-3
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: null
