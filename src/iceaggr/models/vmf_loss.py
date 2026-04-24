@@ -59,7 +59,10 @@ class VMFMixtureLoss(nn.Module):
         super().__init__()
         self.kappa_min = kappa_min
         self.kappa_max = kappa_max
-        self.kappa_reg = kappa_reg
+        # Registered buffer so torch.compile sees in-place updates (used by
+        # train_flat.py's anneal schedule). In-place ops via .fill_() keep the
+        # compiled graph valid.
+        self.register_buffer('kappa_reg', torch.tensor(float(kappa_reg)))
 
     def forward(
         self,
@@ -106,8 +109,9 @@ class VMFMixtureLoss(nn.Module):
         log_component = log_pi + log_c3 + kappa * dot  # (B, K)
         log_likelihood = torch.logsumexp(log_component, dim=-1)  # (B,)
         nll = -log_likelihood.mean()
-        if self.kappa_reg > 0:
-            nll = nll + self.kappa_reg * (kappa**2).mean()
+        # Always apply (kappa_reg == 0 is a no-op); no Python branch so the
+        # compiled graph stays stable when kappa_reg is annealed.
+        nll = nll + self.kappa_reg * (kappa**2).mean()
         return nll
 
 

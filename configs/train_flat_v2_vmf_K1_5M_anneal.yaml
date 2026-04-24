@@ -1,0 +1,69 @@
+# v2 none K=84 ~5M params with vMF head, K=1 + annealed kappa_reg.
+#
+# Hypothesis (from analyzing v2-vmf-K84-5M-mix3-10ep on batches 656-659):
+#   - K=3 is wasted: two components stay pinned at kappa_min=1 as uniform
+#     "safety-valve" fallbacks; only component 3 predicts. A single vMF
+#     should match the NLL with cleaner math and a single κ as confidence.
+#   - kappa_reg=1e-4 is strongly binding. Observed max κ = 195 while MLE-
+#     optimal κ for well-reconstructed events (~1° error) is ~8000. The reg
+#     term 1e-4·κ² strongly caps confidence. Annealing to 0 over the first
+#     30% of training stabilizes early training, then lets κ grow toward MLE.
+#
+# val/angular_error_{rad,deg} is the comparable metric vs. both the
+# angular-distance and K=3 vMF baselines.
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 1
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 700.0
+  vmf_kappa_reg: 1.0e-4               # starting value (same as K=3 baseline)
+  vmf_kappa_reg_final: 0.0            # annealed to zero
+  vmf_kappa_reg_anneal_fraction: 0.3  # linear anneal over first 30% of steps
+
+training:
+  epochs: 10
+  batch_size: 4096
+  lr: 3e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  max_events: 200000000
+  val_events: 100000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-vmf-K1-5M-anneal-10ep
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - input-none
+    - vmf
+    - mixture-1
+    - kappa-reg-anneal
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: null

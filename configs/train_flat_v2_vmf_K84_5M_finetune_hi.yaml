@@ -1,0 +1,63 @@
+# Fine-tune K84 5M vMF on high-activity events (>= 1000 total pulses)
+#
+# Starts from the 10-epoch vMF mixture-3 checkpoint and continues training
+# exclusively on events with >= 1000 pulses (1.13% of dataset = ~1.46M events).
+#
+# Mirrors train_flat_v2_none_K84_5M_finetune_hi.yaml (the MAE/angular-distance
+# recipe). Only the head + loss change: vMF mixture of 3 (NLL).
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 512
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 700.0
+  vmf_kappa_reg: 1.0e-4
+
+training:
+  epochs: 10
+  batch_size: 512           # H100 benchmark: ~21 GB, ~3150 events/s, ~2850 steps/epoch
+  lr: 3e-5                  # 10x lower than pretraining lr
+  warmup_steps: 500
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  min_pulses: 1000
+  max_events: 200000000
+  val_events: 50000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 635]
+  val_batches: [636, 660]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-vmf-K84-5M-mix3-finetune-hi1000
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - vmf
+    - mixture-3
+    - finetune
+    - high-activity
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: checkpoints/v2-vmf-K84-5M-mix3-10ep/best.pt
+  finetune: true            # load model weights only, fresh optimizer+scheduler

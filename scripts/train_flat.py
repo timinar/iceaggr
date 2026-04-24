@@ -190,6 +190,29 @@ def create_dataloader(
     return loader, sampler
 
 
+def _unwrap(model: nn.Module) -> nn.Module:
+    """Return the underlying module through torch.compile's OptimizedModule."""
+    return getattr(model, '_orig_mod', model)
+
+
+def compute_kappa_reg(config: dict, global_step: int, total_steps: int) -> float:
+    """Linear schedule for vMF kappa_reg.
+
+    Reads vmf_kappa_reg (start), vmf_kappa_reg_final (end), and
+    vmf_kappa_reg_anneal_fraction from the model config. Default behavior
+    (no anneal keys set) returns vmf_kappa_reg unchanged.
+    """
+    m = config['model']
+    reg_start = float(m.get('vmf_kappa_reg', 1e-4))
+    reg_final = float(m.get('vmf_kappa_reg_final', reg_start))
+    frac = float(m.get('vmf_kappa_reg_anneal_fraction', 0.0))
+    if reg_final == reg_start or frac <= 0.0:
+        return reg_start
+    anneal_steps = max(1, int(frac * total_steps))
+    progress = min(1.0, global_step / anneal_steps)
+    return reg_start + (reg_final - reg_start) * progress
+
+
 def train_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -218,6 +241,8 @@ def train_epoch(
     n_trained = 0
     start_time = time.time()
     head_type = config['model'].get('head_type', 'directional')
+    total_steps = n_batches * config['training']['epochs']
+    current_kappa_reg = None  # set each step when head_type == 'vmf'
 
     for batch_idx, batch in enumerate(loader):
         actual_batch = start_batch + batch_idx
@@ -226,6 +251,13 @@ def train_epoch(
         targets = batch['targets'].to(device)
 
         optimizer.zero_grad()
+
+        # vMF: apply kappa_reg schedule (in-place on buffer so torch.compile
+        # sees the update without recompiling).
+        if head_type == 'vmf':
+            global_step = (epoch - 1) * n_batches + actual_batch
+            current_kappa_reg = compute_kappa_reg(config, global_step, total_steps)
+            _unwrap(model).vmf_loss.kappa_reg.fill_(current_kappa_reg)
 
         # Forward with AMP
         with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=config['training']['use_amp']):
@@ -261,6 +293,8 @@ def train_epoch(
             }
             if head_type != 'vmf':
                 log_payload["train/loss_deg"] = torch.rad2deg(torch.tensor(loss.item())).item()
+            else:
+                log_payload["train/kappa_reg"] = current_kappa_reg
             wandb_run.log(log_payload, step=step)
 
         # Progress every 25 batches
