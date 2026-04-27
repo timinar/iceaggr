@@ -75,6 +75,10 @@ def run(args):
     state = ckpt["model"]
     if any(k.startswith("_orig_mod.") for k in state):
         state = {k.removeprefix("_orig_mod."): v for k, v in state.items()}
+    if "vmf_loss.kappa_reg" not in state:
+        state["vmf_loss.kappa_reg"] = torch.tensor(
+            float(model_cfg.get("vmf_kappa_reg", 1e-4))
+        )
     model.load_state_dict(state)
     model.eval().to(device)
     logger.info(f"Params: {sum(p.numel() for p in model.parameters()):,}")
