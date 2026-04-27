@@ -33,6 +33,20 @@ def _log_sinh_stable(x: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _bounded_kappa_from_raw(
+    raw_kappa: torch.Tensor,
+    kappa_min: float,
+    kappa_max: float,
+    kappa_temperature: float,
+) -> torch.Tensor:
+    """Map unconstrained raw_kappa to [kappa_min, kappa_max] with smooth gradients."""
+    t = max(float(kappa_temperature), 1e-6)
+    span = float(kappa_max) - float(kappa_min)
+    if span <= 0:
+        raise ValueError("kappa_max must be greater than kappa_min")
+    return float(kappa_min) + span * torch.sigmoid(raw_kappa / t)
+
+
 # ---------------------------------------------------------------------------
 # VMF mixture loss
 # ---------------------------------------------------------------------------
@@ -45,8 +59,9 @@ class VMFMixtureLoss(nn.Module):
     C_3(κ) = κ / (4π sinh(κ))
 
     Args:
-        kappa_min: Minimum κ (added after softplus)
-        kappa_max: Maximum κ (clamped)
+        kappa_min: Minimum κ for bounded parameterization
+        kappa_max: Maximum κ for bounded parameterization
+        kappa_temperature: Temperature T in sigmoid(raw_kappa / T)
         kappa_reg: L2 regularization weight on κ
     """
 
@@ -54,11 +69,13 @@ class VMFMixtureLoss(nn.Module):
         self,
         kappa_min: float = 1.0,
         kappa_max: float = 500.0,
+        kappa_temperature: float = 1.0,
         kappa_reg: float = 1e-4,
     ):
         super().__init__()
         self.kappa_min = kappa_min
         self.kappa_max = kappa_max
+        self.kappa_temperature = kappa_temperature
         self.kappa_reg = kappa_reg
 
     def forward(
@@ -91,9 +108,11 @@ class VMFMixtureLoss(nn.Module):
         log_weights: torch.Tensor,
         target: torch.Tensor,
     ) -> torch.Tensor:
-        raw_kappa = torch.clamp(raw_kappa, min=-20.0, max=20.0)
-        kappa = torch.clamp(
-            F.softplus(raw_kappa) + self.kappa_min, max=self.kappa_max
+        kappa = _bounded_kappa_from_raw(
+            raw_kappa,
+            kappa_min=self.kappa_min,
+            kappa_max=self.kappa_max,
+            kappa_temperature=self.kappa_temperature,
         )
 
         log_pi = F.log_softmax(log_weights, dim=-1)  # (B, K)
@@ -166,6 +185,7 @@ def vmf_weighted_mean(
     log_weights: torch.Tensor,
     kappa_min: float = 1.0,
     kappa_max: float = 500.0,
+    kappa_temperature: float = 1.0,
 ) -> torch.Tensor:
     """
     κ-weighted mean direction from a vMF mixture → (B, 3) unit vector.
@@ -173,9 +193,14 @@ def vmf_weighted_mean(
     Higher-κ components (more confident) contribute more to the mean.
     """
     mu = mu.float()
-    raw_kappa = torch.clamp(raw_kappa.float(), -20.0, 20.0)
+    raw_kappa = raw_kappa.float()
     log_weights = log_weights.float()
-    kappa = torch.clamp(F.softplus(raw_kappa) + kappa_min, max=kappa_max)
+    kappa = _bounded_kappa_from_raw(
+        raw_kappa,
+        kappa_min=kappa_min,
+        kappa_max=kappa_max,
+        kappa_temperature=kappa_temperature,
+    )
     w = F.softmax(log_weights, dim=-1)
     mean_dir = (w * kappa).unsqueeze(-1) * mu
     return F.normalize(mean_dir.sum(dim=1), dim=-1)
