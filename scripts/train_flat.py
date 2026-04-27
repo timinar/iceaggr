@@ -498,7 +498,21 @@ def main():
     resume_path = config['checkpoint'].get('resume')
     if resume_path and Path(resume_path).exists():
         checkpoint = torch.load(resume_path)
-        model.load_state_dict(checkpoint['model'])
+        state = checkpoint['model']
+        # Back-compat: legacy vMF checkpoints saved before kappa_reg became a
+        # registered buffer don't carry it. Inject from current config so the
+        # buffer-aware model loads cleanly. Handles both compiled (_orig_mod.)
+        # and non-compiled key prefixes.
+        head_type = config['model'].get('head_type', 'directional')
+        if head_type == 'vmf':
+            has_buf = any(k.endswith('vmf_loss.kappa_reg') for k in state)
+            if not has_buf:
+                prefix = '_orig_mod.' if any(k.startswith('_orig_mod.') for k in state) else ''
+                state[f'{prefix}vmf_loss.kappa_reg'] = torch.tensor(
+                    float(config['model'].get('vmf_kappa_reg', 1e-4))
+                )
+                logger.info(f"Injected vmf_loss.kappa_reg into legacy checkpoint (key: {prefix}vmf_loss.kappa_reg)")
+        model.load_state_dict(state)
         if config['checkpoint'].get('finetune', False):
             # Fine-tune mode: load model weights only, start fresh optimizer+scheduler
             logger.info("Fine-tune mode: loaded model weights only, fresh optimizer+scheduler")

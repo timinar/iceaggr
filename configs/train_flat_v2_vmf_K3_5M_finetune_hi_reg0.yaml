@@ -1,0 +1,69 @@
+# Fine-tune K=3 vMF base on high-activity events (>=1000 pulses) with kappa_reg=0.
+#
+# Ablation: same recipe as configs/train_flat_v2_vmf_K84_5M_finetune_hi.yaml
+# (K=3 finetune that gave 6.82°/1.96° on the held-out ≥1000-pulse slice) but
+# with kappa_reg=0 throughout. Tests whether removing the regularization alone
+# gives the K=1 finetune's selection sharpness (top-10% median 0.91° vs K=3's
+# 3.18°), or whether the K=1 vs K=3 structural choice is the dominant factor.
+#
+# Comparison points after this finishes:
+#   - K=3 finetune reg=1e-4 (existing): 6.82° / 1.96°,  top-10% by κ: 3.66° / 3.18°
+#   - K=1 finetune reg=0   (existing):  7.09° / 2.18°,  top-10% by κ: 1.17° / 0.91°
+#   - K=3 finetune reg=0   (this run):  ?
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 512
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 700.0
+  vmf_kappa_reg: 0.0                 # ablation: zero reg
+
+training:
+  epochs: 10
+  batch_size: 512
+  lr: 3e-5
+  warmup_steps: 500
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  min_pulses: 1000
+  max_events: 200000000
+  val_events: 50000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 635]
+  val_batches: [636, 660]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-vmf-K3-5M-finetune-hi1000-reg0
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - vmf
+    - mixture-3
+    - finetune
+    - high-activity
+    - reg-0-ablation
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: checkpoints/v2-vmf-K84-5M-mix3-10ep/best.pt
+  finetune: true            # load model weights only, fresh optimizer+scheduler
