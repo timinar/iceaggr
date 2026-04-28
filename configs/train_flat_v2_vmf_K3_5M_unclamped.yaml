@@ -1,0 +1,79 @@
+# v2 none K=84 ~5M params, K=3 vMF mixture, UNCLAMPED softplus + annealed kappa_reg.
+#
+# Hypothesis (from analyzing K=1 anneal κ_eff distribution on 656-659):
+#   The original parameterization clamped raw_kappa to [-20, 20], capping the
+#   training-time κ at softplus(20)+1 ≈ 21. This created a hard expressive
+#   ceiling: even confident high-pulse events could not learn κ > 21, and the
+#   inference parquet's ~70-130 κ tail was an uncalibrated artifact of
+#   weight-sharing across events. The κ-vs-N_pulses plateau (paper figure
+#   kappa_vs_pulses_K1) is a direct consequence.
+#
+#   This run drops both clamps from VMFMixtureLoss (raw_kappa AND kappa_max),
+#   so κ = softplus(raw_kappa) + κ_min with no upper bound. _log_sinh_stable
+#   keeps log p(x) numerically safe well past κ ~ 1e6, and the annealed
+#   kappa_reg suppresses early divergence.
+#
+#   For K=3 specifically: κ enters the inference-time direction via the
+#   κ-weighted mean — so a properly-trained κ tail can actively *improve*
+#   point estimates on multimodal-evidence events, not just calibration.
+#
+# Comparison points (held-out 656-659 ≥1000 pulses):
+#   - K=3 mix base (clamped):       7.72° / 2.81°
+#   - K=3 mix finetune (clamped):   6.82° / 1.96°
+#   - K=3 unclamped base+ft (this): ?
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_reg: 1.0e-4               # starting value
+  vmf_kappa_reg_final: 0.0            # annealed to zero
+  vmf_kappa_reg_anneal_fraction: 0.3  # linear anneal over first 30% of steps
+
+training:
+  epochs: 10
+  batch_size: 4096
+  lr: 3e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  max_events: 200000000
+  val_events: 100000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-vmf-K3-5M-unclamped-anneal-10ep
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - input-none
+    - vmf
+    - mixture-3
+    - kappa-unclamped
+    - kappa-reg-anneal
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: null

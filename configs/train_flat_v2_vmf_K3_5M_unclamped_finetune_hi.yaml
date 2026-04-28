@@ -1,0 +1,61 @@
+# Fine-tune K=3 unclamped vMF on high-activity events (>= 1000 pulses).
+#
+# Starts from the K=3 unclamped + annealed-reg base checkpoint
+# (v2-vmf-K3-5M-unclamped-anneal-10ep) and continues training exclusively on
+# events with >= 1000 pulses. kappa_reg held at 0 throughout finetune.
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 512
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_reg: 0.0                 # anneal already finished in pretrain
+
+training:
+  epochs: 10
+  batch_size: 512
+  lr: 3e-5
+  warmup_steps: 500
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  min_pulses: 1000
+  max_events: 200000000
+  val_events: 50000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 635]
+  val_batches: [636, 660]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-vmf-K3-5M-unclamped-finetune-hi1000
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - vmf
+    - mixture-3
+    - kappa-unclamped
+    - finetune
+    - high-activity
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: checkpoints/v2-vmf-K3-5M-unclamped-anneal-10ep/best.pt
+  finetune: true            # load model weights only, fresh optimizer+scheduler

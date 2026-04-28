@@ -44,21 +44,23 @@ class VMFMixtureLoss(nn.Module):
     p(x) = Σ_k π_k · C_3(κ_k) · exp(κ_k · μ_k^T x)
     C_3(κ) = κ / (4π sinh(κ))
 
+    κ is parameterized as softplus(raw_κ) + κ_min, with no upper clamp:
+    on S² there is no natural ceiling on concentration (κ→∞ ⇔ Dirac on the
+    sphere). _log_sinh_stable handles overflow well past κ ~ 1e6, and
+    kappa_reg keeps κ bounded during early training.
+
     Args:
-        kappa_min: Minimum κ (added after softplus)
-        kappa_max: Maximum κ (clamped)
-        kappa_reg: L2 regularization weight on κ
+        kappa_min: Minimum κ (softplus offset, κ floor)
+        kappa_reg: L2 regularization weight on κ (annealable via the buffer)
     """
 
     def __init__(
         self,
         kappa_min: float = 1.0,
-        kappa_max: float = 500.0,
         kappa_reg: float = 1e-4,
     ):
         super().__init__()
         self.kappa_min = kappa_min
-        self.kappa_max = kappa_max
         # Registered buffer so torch.compile sees in-place updates (used by
         # train_flat.py's anneal schedule). In-place ops via .fill_() keep the
         # compiled graph valid.
@@ -94,10 +96,7 @@ class VMFMixtureLoss(nn.Module):
         log_weights: torch.Tensor,
         target: torch.Tensor,
     ) -> torch.Tensor:
-        raw_kappa = torch.clamp(raw_kappa, min=-20.0, max=20.0)
-        kappa = torch.clamp(
-            F.softplus(raw_kappa) + self.kappa_min, max=self.kappa_max
-        )
+        kappa = F.softplus(raw_kappa) + self.kappa_min
 
         log_pi = F.log_softmax(log_weights, dim=-1)  # (B, K)
         dot = torch.sum(mu * target.unsqueeze(1), dim=-1)  # (B, K)
@@ -169,17 +168,17 @@ def vmf_weighted_mean(
     raw_kappa: torch.Tensor,
     log_weights: torch.Tensor,
     kappa_min: float = 1.0,
-    kappa_max: float = 500.0,
 ) -> torch.Tensor:
     """
     κ-weighted mean direction from a vMF mixture → (B, 3) unit vector.
 
     Higher-κ components (more confident) contribute more to the mean.
+    Uses the same unclamped softplus+kappa_min map as VMFMixtureLoss.
     """
     mu = mu.float()
-    raw_kappa = torch.clamp(raw_kappa.float(), -20.0, 20.0)
+    raw_kappa = raw_kappa.float()
     log_weights = log_weights.float()
-    kappa = torch.clamp(F.softplus(raw_kappa) + kappa_min, max=kappa_max)
+    kappa = F.softplus(raw_kappa) + kappa_min
     w = F.softmax(log_weights, dim=-1)
     mean_dir = (w * kappa).unsqueeze(-1) * mu
     return F.normalize(mean_dir.sum(dim=1), dim=-1)

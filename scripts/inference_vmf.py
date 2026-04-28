@@ -68,7 +68,6 @@ def run(args):
     assert model_cfg["head_type"] == "vmf", "This script is for vMF checkpoints"
     K = model_cfg.get("vmf_components", 1)
     kappa_min = model_cfg.get("vmf_kappa_min", 1.0)
-    kappa_max = model_cfg.get("vmf_kappa_max", 500.0)
     logger.info(f"Model config: {model_cfg}")
 
     model = FlatTransformerV2(model_cfg)
@@ -125,7 +124,7 @@ def run(args):
             raw_kappa = out["raw_kappa"].float().cpu()  # (B, K)
             log_weights = out["log_weights"].float().cpu()  # (B, K)
 
-            kappa = torch.clamp(F.softplus(raw_kappa) + kappa_min, max=kappa_max)  # (B, K)
+            kappa = F.softplus(raw_kappa) + kappa_min  # (B, K), unclamped (matches loss/forward)
             weights = F.softmax(log_weights, dim=-1)  # (B, K)
             kappa_eff = (weights * kappa).sum(dim=-1)  # (B,)
             kappa_max_per = kappa.max(dim=-1).values  # (B,)
