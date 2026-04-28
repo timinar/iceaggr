@@ -195,6 +195,12 @@ def _unwrap(model: nn.Module) -> nn.Module:
     return getattr(model, '_orig_mod', model)
 
 
+def _amp_dtype(config: dict) -> torch.dtype:
+    """Pick autocast dtype from config (default fp16; 'bf16' opt-in)."""
+    name = str(config['training'].get('amp_dtype', 'fp16')).lower()
+    return torch.bfloat16 if name in ('bf16', 'bfloat16') else torch.float16
+
+
 def compute_kappa_reg(config: dict, global_step: int, total_steps: int) -> float:
     """Linear schedule for vMF kappa_reg.
 
@@ -260,7 +266,7 @@ def train_epoch(
             _unwrap(model).vmf_loss.kappa_reg.fill_(current_kappa_reg)
 
         # Forward with AMP
-        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=config['training']['use_amp']):
+        with torch.autocast(device_type='cuda', dtype=_amp_dtype(config), enabled=config['training']['use_amp']):
             if head_type == 'vmf':
                 target_unit = angles_to_unit_vector(targets[:, 0], targets[:, 1])
                 outputs = model(dom_vectors, padding_mask, target=target_unit)
@@ -375,7 +381,7 @@ def validate(model: nn.Module, loader: DataLoader, device: str, config: dict) ->
             padding_mask = batch['padding_mask'].to(device)
             targets = batch['targets'].to(device)
 
-            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=config['training']['use_amp']):
+            with torch.autocast(device_type='cuda', dtype=_amp_dtype(config), enabled=config['training']['use_amp']):
                 if head_type == 'vmf':
                     target_unit = angles_to_unit_vector(targets[:, 0], targets[:, 1])
                     outputs = model(dom_vectors, padding_mask, target=target_unit)
@@ -489,7 +495,11 @@ def main():
     )
 
     # AMP scaler
-    scaler = torch.amp.GradScaler(enabled=config['training']['use_amp'])
+    # GradScaler is fp16-only; bf16 has fp32-equivalent exponent range and
+    # doesn't need loss scaling. Disabling it under bf16 is the standard pattern.
+    scaler = torch.amp.GradScaler(
+        enabled=config['training']['use_amp'] and _amp_dtype(config) == torch.float16
+    )
 
     # Resume from checkpoint if provided
     start_epoch = 1

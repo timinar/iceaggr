@@ -30,6 +30,7 @@ training:
   weight_decay: 0.01
   gradient_clip: 1.0
   use_amp: true
+  amp_dtype: bf16            # match base; bf16 keeps fp32-range under κ_max=10000
 
 data:
   min_pulses: 1000

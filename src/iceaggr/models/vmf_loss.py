@@ -25,12 +25,21 @@ import torch.nn.functional as F
 # ---------------------------------------------------------------------------
 
 def _log_sinh_stable(x: torch.Tensor) -> torch.Tensor:
-    """Numerically stable log(sinh(x)) for x > 0."""
-    return torch.where(
-        x > 20.0,
-        x - math.log(2.0),
-        torch.log(torch.sinh(x) + 1e-8),
-    )
+    """Numerically stable log(sinh(x)) for x > 0, with finite gradient.
+
+    Uses the identity log(sinh(x)) = x - log(2) + log1p(-exp(-2x)).
+    Single branch (no torch.where → no masked-NaN-backward gotcha), and
+    exp(-2x) underflows cleanly to 0 for large x, leaving the dominant
+    x - log(2) term. For our regime (x ≥ kappa_min ≥ 1) the log1p argument
+    stays in (-1, 0), so the derivative
+
+        d/dx log(sinh(x)) = 1 + 2 exp(-2x) / (1 - exp(-2x)) = coth(x)
+
+    evaluates finite for all x ∈ [1, ∞). The legacy where-based form
+    silently returned NaN gradients for x > ~89 (fp32 sinh overflow in the
+    unused branch).
+    """
+    return x - math.log(2.0) + torch.log1p(-torch.exp(-2.0 * x))
 
 
 # ---------------------------------------------------------------------------
