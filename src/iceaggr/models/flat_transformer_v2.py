@@ -187,6 +187,7 @@ class FlatTransformerV2(nn.Module):
             )
             self.vmf_loss = VMFMixtureLoss(
                 kappa_min=config.get('vmf_kappa_min', 1.0),
+                kappa_max=config.get('vmf_kappa_max', 10000.0),
                 kappa_reg=config.get('vmf_kappa_reg', 1e-4),
             )
         else:
@@ -282,7 +283,9 @@ class FlatTransformerV2(nn.Module):
         # vMF mixture head path
         mu, raw_kappa, log_weights = self.vmf_head(embedding)
         direction = vmf_weighted_mean(
-            mu, raw_kappa, log_weights, kappa_min=self.vmf_loss.kappa_min
+            mu, raw_kappa, log_weights,
+            kappa_min=self.vmf_loss.kappa_min,
+            kappa_max=self.vmf_loss.kappa_max,
         )
         out = {
             'mu': mu,

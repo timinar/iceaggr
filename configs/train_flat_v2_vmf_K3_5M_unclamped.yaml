@@ -37,6 +37,13 @@ model:
   head_type: vmf
   vmf_components: 3
   vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0              # safety net only — non-binding for any
+                                      # physically meaningful event (κ=10000
+                                      # ↔ σ ≈ 0.6° on S²; MLE κ for our best
+                                      # 2° events is ~1600). Bounds the
+                                      # per-step gradient on μ (∂NLL/∂μ ∝ κ)
+                                      # without capping training-time κ in
+                                      # the useful range.
   vmf_kappa_reg: 1.0e-4               # starting value
   vmf_kappa_reg_final: 0.0            # annealed to zero
   vmf_kappa_reg_anneal_fraction: 0.3  # linear anneal over first 30% of steps

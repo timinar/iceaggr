@@ -19,6 +19,7 @@ model:
   head_type: vmf
   vmf_components: 3
   vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0             # safety net (non-binding); see base config
   vmf_kappa_reg: 0.0                 # anneal already finished in pretrain
 
 training:

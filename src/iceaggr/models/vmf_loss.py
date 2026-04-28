@@ -44,23 +44,29 @@ class VMFMixtureLoss(nn.Module):
     p(x) = Σ_k π_k · C_3(κ_k) · exp(κ_k · μ_k^T x)
     C_3(κ) = κ / (4π sinh(κ))
 
-    κ is parameterized as softplus(raw_κ) + κ_min, with no upper clamp:
-    on S² there is no natural ceiling on concentration (κ→∞ ⇔ Dirac on the
-    sphere). _log_sinh_stable handles overflow well past κ ~ 1e6, and
-    kappa_reg keeps κ bounded during early training.
+    κ is parameterized as clamp(softplus(raw_κ) + κ_min, max=κ_max). The
+    upper clamp is a *safety net* set well above any physically meaningful
+    concentration (default 10000 ↔ σ ≈ 0.8° on S²; our best events imply
+    MLE-optimal κ ~ 1600). It bounds the per-step gradient on μ (which
+    scales with κ) without artificially capping training-time κ — the
+    binding constraint in the legacy code was clamp(raw_κ, -20, 20), which
+    capped κ at ~21 and is what we removed.
 
     Args:
         kappa_min: Minimum κ (softplus offset, κ floor)
+        kappa_max: Safety-net ceiling on κ (non-binding for any reasonable run)
         kappa_reg: L2 regularization weight on κ (annealable via the buffer)
     """
 
     def __init__(
         self,
         kappa_min: float = 1.0,
+        kappa_max: float = 10000.0,
         kappa_reg: float = 1e-4,
     ):
         super().__init__()
         self.kappa_min = kappa_min
+        self.kappa_max = kappa_max
         # Registered buffer so torch.compile sees in-place updates (used by
         # train_flat.py's anneal schedule). In-place ops via .fill_() keep the
         # compiled graph valid.
@@ -97,6 +103,7 @@ class VMFMixtureLoss(nn.Module):
         target: torch.Tensor,
     ) -> torch.Tensor:
         kappa = F.softplus(raw_kappa) + self.kappa_min
+        kappa = torch.clamp(kappa, max=self.kappa_max)
 
         log_pi = F.log_softmax(log_weights, dim=-1)  # (B, K)
         dot = torch.sum(mu * target.unsqueeze(1), dim=-1)  # (B, K)
@@ -168,17 +175,20 @@ def vmf_weighted_mean(
     raw_kappa: torch.Tensor,
     log_weights: torch.Tensor,
     kappa_min: float = 1.0,
+    kappa_max: float = 10000.0,
 ) -> torch.Tensor:
     """
     κ-weighted mean direction from a vMF mixture → (B, 3) unit vector.
 
     Higher-κ components (more confident) contribute more to the mean.
-    Uses the same unclamped softplus+kappa_min map as VMFMixtureLoss.
+    Uses the same softplus+kappa_min map (with safety-net upper clamp at
+    kappa_max) as VMFMixtureLoss.
     """
     mu = mu.float()
     raw_kappa = raw_kappa.float()
     log_weights = log_weights.float()
     kappa = F.softplus(raw_kappa) + kappa_min
+    kappa = torch.clamp(kappa, max=kappa_max)
     w = F.softmax(log_weights, dim=-1)
     mean_dir = (w * kappa).unsqueeze(-1) * mu
     return F.normalize(mean_dir.sum(dim=1), dim=-1)
