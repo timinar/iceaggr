@@ -5,12 +5,17 @@
 #
 # Trained from scratch as an empirical comparison to our unclamped softplus
 # K=3 base (configs/train_flat_v2_vmf_K3_5M_unclamped.yaml). PR #6's defaults:
-# κ_min=1, κ_max=500, T=1. With the head's zero-init bias, κ_init = 250.5 —
-# the network starts overconfident in random directions, and has to fight its
-# way down. Init NLL ≈ 156 (vs ~2.7 for softplus init).
+# κ_min=1, κ_max=500, T=1.
 #
-# kappa_reg anneal (1e-4 → 0 over first 30%) is kept for stability during
-# this fight-down phase.
+# Init fairness: PR #6's vanilla zero-bias init gives κ_init ≈ 250 (severely
+# overconfident, init NLL ≈ 156). To make the comparison about the
+# parameterization itself rather than the init handicap, FlatTransformerV2
+# auto-biases the κ-channel so κ_init ≈ κ_min + log(2) ≈ 1.69 — matching
+# softplus's natural zero-bias init. This is the default behavior; override
+# via vmf_kappa_init_target to test other inits (e.g. set it to 250 to
+# reproduce PR #6's vanilla pathology).
+#
+# kappa_reg anneal (1e-4 → 0 over first 30%) matches the K=3 unclamped recipe.
 #
 # What we'll learn:
 #   - Does it train at all from this init? (smoke check)

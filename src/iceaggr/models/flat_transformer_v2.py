@@ -22,8 +22,10 @@ import torch.nn.functional as F
 from typing import Any, Dict, Optional
 
 
+import math
+
 from .directional_head import DirectionalHead
-from .vmf_loss import VMFMixtureHead, VMFMixtureLoss, vmf_weighted_mean
+from .vmf_loss import VMFMixtureHead, VMFMixtureLoss, kappa_bias_for_target, vmf_weighted_mean
 
 
 def rms_norm(x: torch.Tensor) -> torch.Tensor:
@@ -192,6 +194,29 @@ class FlatTransformerV2(nn.Module):
                 kappa_param=config.get('vmf_kappa_param', 'softplus'),
                 kappa_temperature=config.get('vmf_kappa_temperature', 1.0),
             )
+
+            # Bias the κ-channel of the head's output so κ_init matches a
+            # target value (default ≈ κ_min + log(2), the natural softplus
+            # zero-bias init). This matters for the sigmoid parameterization,
+            # where zero bias gives κ_init ≈ (κ_min + κ_max) / 2 — wildly
+            # overconfident — and forces the model to fight its way down. With
+            # this bias, softplus and sigmoid start at the same κ, so any
+            # difference in trained behavior is the parameterization itself.
+            target_init = config.get('vmf_kappa_init_target')
+            if target_init is None:
+                target_init = config.get('vmf_kappa_min', 1.0) + math.log(2.0)
+            bias_value = kappa_bias_for_target(
+                target=float(target_init),
+                kappa_min=float(config.get('vmf_kappa_min', 1.0)),
+                kappa_max=float(config.get('vmf_kappa_max', 10000.0)),
+                param=config.get('vmf_kappa_param', 'softplus'),
+                kappa_temperature=float(config.get('vmf_kappa_temperature', 1.0)),
+            )
+            K = config.get('vmf_components', 1)
+            with torch.no_grad():
+                head_bias = self.vmf_head.net[-1].bias  # (K*5,) — 3 mu + 1 κ + 1 logw per component
+                for k in range(K):
+                    head_bias[k * 5 + 3] = bias_value
         else:
             raise ValueError(f"Unsupported head_type: {self.head_type}")
 

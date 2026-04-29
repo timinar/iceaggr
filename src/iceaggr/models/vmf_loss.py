@@ -42,6 +42,33 @@ def _log_sinh_stable(x: torch.Tensor) -> torch.Tensor:
     return x - math.log(2.0) + torch.log1p(-torch.exp(-2.0 * x))
 
 
+def kappa_bias_for_target(
+    target: float,
+    kappa_min: float,
+    kappa_max: float,
+    param: str = 'softplus',
+    kappa_temperature: float = 1.0,
+) -> float:
+    """Inverse of _kappa_from_raw: raw bias that yields κ ≈ target at zero input.
+
+    Used for head κ-bias init so that softplus and sigmoid parameterizations
+    start at the same κ. Without this, sigmoid with PR #6 defaults gives
+    κ_init = (κ_min + κ_max) / 2 ≈ 250, vs softplus's κ_init = κ_min + log(2)
+    ≈ 1.69. The fair-comparison fix is to pre-bias the head so both start at
+    the same κ.
+    """
+    eps = 1e-6
+    if param == 'sigmoid':
+        span = float(kappa_max) - float(kappa_min)
+        x = (float(target) - float(kappa_min)) / span
+        x = min(max(x, eps), 1.0 - eps)
+        t = max(float(kappa_temperature), 1e-6)
+        return t * math.log(x / (1.0 - x))
+    # softplus: κ = softplus(raw) + κ_min  →  raw = log(exp(κ - κ_min) - 1)
+    y = max(float(target) - float(kappa_min), eps)
+    return math.log(math.expm1(y))
+
+
 def _kappa_from_raw(
     raw_kappa: torch.Tensor,
     kappa_min: float,
