@@ -189,6 +189,8 @@ class FlatTransformerV2(nn.Module):
                 kappa_min=config.get('vmf_kappa_min', 1.0),
                 kappa_max=config.get('vmf_kappa_max', 10000.0),
                 kappa_reg=config.get('vmf_kappa_reg', 1e-4),
+                kappa_param=config.get('vmf_kappa_param', 'softplus'),
+                kappa_temperature=config.get('vmf_kappa_temperature', 1.0),
             )
         else:
             raise ValueError(f"Unsupported head_type: {self.head_type}")
@@ -286,6 +288,8 @@ class FlatTransformerV2(nn.Module):
             mu, raw_kappa, log_weights,
             kappa_min=self.vmf_loss.kappa_min,
             kappa_max=self.vmf_loss.kappa_max,
+            kappa_param=self.vmf_loss.kappa_param,
+            kappa_temperature=self.vmf_loss.kappa_temperature,
         )
         out = {
             'mu': mu,

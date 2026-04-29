@@ -51,7 +51,10 @@ def build_model_config_from_ckpt(ckpt_cfg: dict) -> dict:
         "input_mode": m.get("input_mode", "mlp"),
         "head_type": m.get("head_type", "directional"),
     }
-    for k in ("vmf_components", "vmf_kappa_min", "vmf_kappa_max", "vmf_kappa_reg"):
+    for k in (
+        "vmf_components", "vmf_kappa_min", "vmf_kappa_max", "vmf_kappa_reg",
+        "vmf_kappa_param", "vmf_kappa_temperature",
+    ):
         if k in m:
             cfg[k] = m[k]
     return cfg
@@ -69,6 +72,8 @@ def run(args):
     K = model_cfg.get("vmf_components", 1)
     kappa_min = model_cfg.get("vmf_kappa_min", 1.0)
     kappa_max = model_cfg.get("vmf_kappa_max", 10000.0)
+    kappa_param = model_cfg.get("vmf_kappa_param", "softplus")
+    kappa_temperature = model_cfg.get("vmf_kappa_temperature", 1.0)
     logger.info(f"Model config: {model_cfg}")
 
     model = FlatTransformerV2(model_cfg)
@@ -125,7 +130,11 @@ def run(args):
             raw_kappa = out["raw_kappa"].float().cpu()  # (B, K)
             log_weights = out["log_weights"].float().cpu()  # (B, K)
 
-            kappa = torch.clamp(F.softplus(raw_kappa) + kappa_min, max=kappa_max)  # (B, K)
+            from iceaggr.models.vmf_loss import _kappa_from_raw
+            kappa = _kappa_from_raw(  # (B, K) — matches model's internal κ map
+                raw_kappa, kappa_min, kappa_max,
+                param=kappa_param, kappa_temperature=kappa_temperature,
+            )
             weights = F.softmax(log_weights, dim=-1)  # (B, K)
             kappa_eff = (weights * kappa).sum(dim=-1)  # (B,)
             kappa_max_per = kappa.max(dim=-1).values  # (B,)

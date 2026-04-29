@@ -42,6 +42,34 @@ def _log_sinh_stable(x: torch.Tensor) -> torch.Tensor:
     return x - math.log(2.0) + torch.log1p(-torch.exp(-2.0 * x))
 
 
+def _kappa_from_raw(
+    raw_kappa: torch.Tensor,
+    kappa_min: float,
+    kappa_max: float,
+    param: str = 'softplus',
+    kappa_temperature: float = 1.0,
+) -> torch.Tensor:
+    """Map raw κ scalar to κ ∈ [κ_min, κ_max].
+
+    param='softplus' (default):
+        κ = clamp(softplus(raw) + κ_min, max=κ_max)
+        Smooth, asymmetric. κ_max is a non-binding safety net for the
+        gradient-on-μ amplitude. This is what the unclamped K=1/K=3 runs use.
+
+    param='sigmoid':
+        κ = κ_min + (κ_max - κ_min) · σ(raw / T)
+        PR #6's bounded form. Symmetric saturation at both ends; κ_max is a
+        modeling assumption (range cap), not a safety net. At zero-init bias
+        and T=1, κ_init ≈ (κ_min + κ_max) / 2 — overconfident.
+    """
+    if param == 'sigmoid':
+        t = max(float(kappa_temperature), 1e-6)
+        span = float(kappa_max) - float(kappa_min)
+        return float(kappa_min) + span * torch.sigmoid(raw_kappa / t)
+    # default: softplus + safety-net clamp
+    return torch.clamp(F.softplus(raw_kappa) + kappa_min, max=kappa_max)
+
+
 # ---------------------------------------------------------------------------
 # VMF mixture loss
 # ---------------------------------------------------------------------------
@@ -65,6 +93,8 @@ class VMFMixtureLoss(nn.Module):
         kappa_min: Minimum κ (softplus offset, κ floor)
         kappa_max: Safety-net ceiling on κ (non-binding for any reasonable run)
         kappa_reg: L2 regularization weight on κ (annealable via the buffer)
+        kappa_param: 'softplus' (default) or 'sigmoid' (PR #6 form)
+        kappa_temperature: Sigmoid steepness; only used when kappa_param='sigmoid'
     """
 
     def __init__(
@@ -72,10 +102,14 @@ class VMFMixtureLoss(nn.Module):
         kappa_min: float = 1.0,
         kappa_max: float = 10000.0,
         kappa_reg: float = 1e-4,
+        kappa_param: str = 'softplus',
+        kappa_temperature: float = 1.0,
     ):
         super().__init__()
         self.kappa_min = kappa_min
         self.kappa_max = kappa_max
+        self.kappa_param = kappa_param
+        self.kappa_temperature = kappa_temperature
         # Registered buffer so torch.compile sees in-place updates (used by
         # train_flat.py's anneal schedule). In-place ops via .fill_() keep the
         # compiled graph valid.
@@ -111,8 +145,10 @@ class VMFMixtureLoss(nn.Module):
         log_weights: torch.Tensor,
         target: torch.Tensor,
     ) -> torch.Tensor:
-        kappa = F.softplus(raw_kappa) + self.kappa_min
-        kappa = torch.clamp(kappa, max=self.kappa_max)
+        kappa = _kappa_from_raw(
+            raw_kappa, self.kappa_min, self.kappa_max,
+            param=self.kappa_param, kappa_temperature=self.kappa_temperature,
+        )
 
         log_pi = F.log_softmax(log_weights, dim=-1)  # (B, K)
         dot = torch.sum(mu * target.unsqueeze(1), dim=-1)  # (B, K)
@@ -185,19 +221,22 @@ def vmf_weighted_mean(
     log_weights: torch.Tensor,
     kappa_min: float = 1.0,
     kappa_max: float = 10000.0,
+    kappa_param: str = 'softplus',
+    kappa_temperature: float = 1.0,
 ) -> torch.Tensor:
     """
     κ-weighted mean direction from a vMF mixture → (B, 3) unit vector.
 
     Higher-κ components (more confident) contribute more to the mean.
-    Uses the same softplus+kappa_min map (with safety-net upper clamp at
-    kappa_max) as VMFMixtureLoss.
+    Uses the same κ map as VMFMixtureLoss (selectable via kappa_param).
     """
     mu = mu.float()
     raw_kappa = raw_kappa.float()
     log_weights = log_weights.float()
-    kappa = F.softplus(raw_kappa) + kappa_min
-    kappa = torch.clamp(kappa, max=kappa_max)
+    kappa = _kappa_from_raw(
+        raw_kappa, kappa_min, kappa_max,
+        param=kappa_param, kappa_temperature=kappa_temperature,
+    )
     w = F.softmax(log_weights, dim=-1)
     mean_dir = (w * kappa).unsqueeze(-1) * mu
     return F.normalize(mean_dir.sum(dim=1), dim=-1)
