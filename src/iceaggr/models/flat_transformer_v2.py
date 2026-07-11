@@ -194,6 +194,14 @@ class FlatTransformerV2(nn.Module):
                 kappa_param=config.get('vmf_kappa_param', 'softplus'),
                 kappa_temperature=config.get('vmf_kappa_temperature', 1.0),
             )
+            # Opt-in combined loss: NLL + vmf_angular_weight · angular_distance(
+            # point_estimate, truth). Competition-metric term alongside the vMF
+            # NLL (the 2nd-place Kaggle solution found this worth ~55 bps). The
+            # point estimate is the same κ-weighted mean used at inference, and
+            # the gradient flows through it into μ/κ/weights (see forward). At
+            # the default 0.0 the term is skipped entirely, so the loss and every
+            # trained checkpoint stay byte-identical to the pure-NLL path.
+            self.vmf_angular_weight = float(config.get('vmf_angular_weight', 0.0))
 
             # Bias the κ-channel of the head's output so κ_init matches a
             # target value (default ≈ κ_min + log(2), the natural softplus
@@ -325,6 +333,33 @@ class FlatTransformerV2(nn.Module):
         }
 
         if target is not None and self.vmf_loss is not None:
-            out['loss'] = self.vmf_loss(mu, raw_kappa, log_weights, target)
+            loss = self.vmf_loss(mu, raw_kappa, log_weights, target)
+            # Opt-in competition-metric term. self.vmf_angular_weight is a plain
+            # Python float read from config (not a tensor), so this branch is a
+            # trace-time constant under torch.compile — no data-dependent control
+            # flow. When it is 0.0 (default) the else branch reproduces the pure
+            # NLL loss exactly, byte-for-byte.
+            if self.vmf_angular_weight > 0.0:
+                out['loss'] = loss + self.vmf_angular_weight * self._angular_term(
+                    direction, target
+                )
+            else:
+                out['loss'] = loss
 
         return out
+
+    @staticmethod
+    def _angular_term(direction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Mean angular distance (radians) between point estimate and truth.
+
+        Differentiable: ``direction`` is the κ-weighted mean returned by
+        ``vmf_weighted_mean`` (no detach), so gradients flow back into μ/κ/
+        weights and the whole backbone. Computed in fp32 with autocast off —
+        arccos' gradient diverges as |dot|→1, so the dot product is clamped to
+        (-1+1e-7, 1-1e-7) before arccos to keep both the value and the gradient
+        finite.
+        """
+        with torch.amp.autocast("cuda", enabled=False):
+            dot = (direction.float() * target.float()).sum(dim=-1)
+            dot = dot.clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+            return torch.arccos(dot).mean()

@@ -118,6 +118,8 @@ def create_model(config: dict, device: str) -> nn.Module:
             'vmf_kappa_min',
             'vmf_kappa_max',
             'vmf_kappa_reg',
+            # opt-in combined loss: NLL + vmf_angular_weight · angular-distance
+            'vmf_angular_weight',
         ):
             if key in config['model']:
                 model_config[key] = config['model'][key]
