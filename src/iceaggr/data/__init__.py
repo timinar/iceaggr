@@ -14,6 +14,13 @@ from .collators import (
     collate_padded_subsampled,
     make_collate_flat,
 )
+from .collators_npe import (
+    FEATURE_COLS_NPE,
+    INPUT_DIM_NPE,
+    compute_dom_features_npe,
+    normalize_dom_features_npe,
+    make_collate_npe15,
+)
 from .geometry import GeometryLoader
 
 __all__ = [
@@ -32,6 +39,12 @@ __all__ = [
     "collate_with_dom_grouping_legacy",
     "collate_padded_subsampled",
     "make_collate_flat",
+    # NPE-15 summary-statistics tokenization
+    "FEATURE_COLS_NPE",
+    "INPUT_DIM_NPE",
+    "compute_dom_features_npe",
+    "normalize_dom_features_npe",
+    "make_collate_npe15",
     # Geometry
     "GeometryLoader",
 ]

@@ -133,8 +133,11 @@ class FlatTransformerV2(nn.Module):
         hidden_dim = config.get('hidden_dim', 512)
         input_mode = config.get('input_mode', 'mlp')
 
-        # Input dimension: 3 (xyz) + 1 (n_pulses) + 3*K (pulse features)
-        self.input_dim = 4 + 3 * self.max_pulses_per_dom
+        # Input dimension: 3 (xyz) + 1 (n_pulses) + 3*K (pulse features) for the
+        # flat pulse-concat tokenization. Overridable via config for alternative
+        # tokenizations (e.g. the 15-dim NPE summary-statistics tokens), which do
+        # not follow the 4+3*K layout. Default preserves the flat layout exactly.
+        self.input_dim = int(config.get('input_dim', 4 + 3 * self.max_pulses_per_dom))
 
         # Input projection (configurable)
         self._pad_input = 0

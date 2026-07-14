@@ -36,6 +36,7 @@ from iceaggr.data import (
     IceCubeDataset,
     GeometryLoader,
     make_collate_flat,
+    make_collate_npe15,
     BatchAwareSampler,
 )
 from iceaggr.models import (
@@ -113,6 +114,8 @@ def create_model(config: dict, device: str) -> nn.Module:
     if version == 'v2':
         model_config['input_mode'] = config['model'].get('input_mode', 'mlp')
         for key in (
+            # explicit input dim override for non-flat tokenizations (e.g. npe15)
+            'input_dim',
             'head_type',
             'vmf_components',
             'vmf_kappa_min',
@@ -172,11 +175,28 @@ def create_dataloader(
     )
 
     sampler = BatchAwareSampler(dataset.metadata)
-    collate_fn = make_collate_flat(
-        geometry,
-        max_pulses_per_dom=config['model']['max_pulses_per_dom'],
-        max_doms=config['model']['max_doms'],
-    )
+    # Tokenization switch: the default flat pulse-concat tokens, or the 15-dim
+    # NPE summary-statistics tokens for the encoding comparison. Default keeps the
+    # flat path byte-identical.
+    tokenization = config['data'].get('tokenization', 'flat')
+    if tokenization == 'npe15':
+        collate_fn = make_collate_npe15(
+            geometry,
+            max_doms=config['model']['max_doms'],
+            # geometry is the /500-normalized file → positions already normalized
+            normalize_positions=config['data'].get('npe_normalize_positions', False),
+            correct_percentiles=config['data'].get('npe_correct_percentiles', False),
+        )
+    elif tokenization == 'flat':
+        collate_fn = make_collate_flat(
+            geometry,
+            max_pulses_per_dom=config['model']['max_pulses_per_dom'],
+            max_doms=config['model']['max_doms'],
+            # opt-in: order DOM tokens by earliest-hit time so RoPE sees hit rank
+            order_doms_by_time=config['model'].get('order_doms_by_time', False),
+        )
+    else:
+        raise ValueError(f"Unknown data.tokenization: {tokenization!r} (use 'flat' or 'npe15')")
 
     loader = DataLoader(
         dataset,
