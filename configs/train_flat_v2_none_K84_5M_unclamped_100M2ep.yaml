@@ -1,0 +1,71 @@
+# v2 raw K=84 pulse-concat tokenization (production encoding), ~5M params,
+# K=3 vMF mixture, UNCLAMPED softplus + annealed kappa_reg + combined loss.
+# 100M-event / 2-epoch scale point.
+#
+# Raw-encoding twin of configs/train_flat_v2_npe15_5M_unclamped_100M2ep.yaml. The
+# training block, data splits, head, and combined loss (vmf_angular_weight 0.5) are
+# IDENTICAL to the npe15 leg — the only difference is the input tokenization
+# (flat first-84-pulse concat here vs the 15-dim NPE summary statistics there), so a
+# head-to-head isolates the input encoding.
+
+model:
+  version: v2
+  input_mode: none            # identity input proj (input_dim == d_model == 256)
+  max_pulses_per_dom: 84      # flat token width = 4 + 3*84 = 256
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0              # safety net only; see the vMF base config
+  vmf_kappa_reg: 1.0e-4               # starting value
+  vmf_kappa_reg_final: 0.0            # annealed to zero
+  vmf_kappa_reg_anneal_fraction: 0.3  # linear anneal over first 30% of steps
+  vmf_angular_weight: 0.5             # combined loss: NLL + λ·angular-distance
+                                      # (shared with the npe15 twin for isolation)
+
+training:
+  epochs: 2
+  batch_size: 4096
+  lr: 3e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16
+
+data:
+  max_events: 100000000
+  val_events: 50000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-none-K84-5M-combined-100M2ep
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - input-none
+    - vmf
+    - mixture-3
+    - kappa-unclamped
+    - kappa-reg-anneal
+    - combined-loss
+    - scale-100M2ep
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: null

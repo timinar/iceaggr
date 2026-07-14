@@ -24,6 +24,7 @@ model:
   vmf_kappa_min: 1.0
   vmf_kappa_max: 10000.0             # safety net (non-binding); see base config
   vmf_kappa_reg: 0.0                 # anneal already finished in pretrain
+  vmf_angular_weight: 0.5            # combined loss: NLL + λ·angular-distance
 
 training:
   epochs: 10
@@ -49,7 +50,7 @@ data:
 wandb:
   enabled: true
   project: iceaggr
-  name: v2-npe15-5M-unclamped-finetune-hi1000
+  name: v2-npe15-5M-combined-finetune-hi1000
   tags:
     - flat-transformer-v2
     - npe15
@@ -59,11 +60,12 @@ wandb:
     - vmf
     - mixture-3
     - kappa-unclamped
+    - combined-loss
     - finetune
     - high-activity
 
 checkpoint:
   dir: checkpoints
   save_every: 1
-  resume: checkpoints/v2-npe15-5M-unclamped-10ep/best.pt
+  resume: checkpoints/v2-npe15-5M-combined-10ep/best.pt
   finetune: true            # load model weights only, fresh optimizer+scheduler
