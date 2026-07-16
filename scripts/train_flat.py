@@ -206,6 +206,9 @@ def create_dataloader(
     # NPE summary-statistics tokens for the encoding comparison. Default keeps the
     # flat path byte-identical.
     tokenization = config['data'].get('tokenization', 'flat')
+    # opt-in bf16 output + vectorized deterministic subsample (default False =
+    # byte-identical). Not byte-identical when on — validate before flipping.
+    fast_collate = config['data'].get('fast_collate', False)
     if tokenization == 'npe15':
         collate_fn = make_collate_npe15(
             geometry,
@@ -213,6 +216,7 @@ def create_dataloader(
             # geometry is the /500-normalized file → positions already normalized
             normalize_positions=config['data'].get('npe_normalize_positions', False),
             correct_percentiles=config['data'].get('npe_correct_percentiles', False),
+            fast_collate=fast_collate,
         )
     elif tokenization == 'hybrid':
         # 256-dim raw+aggregate DOM tokens (input_mode none/linear, no input_dim
@@ -224,6 +228,7 @@ def create_dataloader(
             include_event_context=config['data'].get('hybrid_include_event_context', True),
             normalize_positions=config['data'].get('npe_normalize_positions', False),
             correct_percentiles=config['data'].get('npe_correct_percentiles', False),
+            fast_collate=fast_collate,
         )
     elif tokenization == 'flat':
         collate_fn = make_collate_flat(
@@ -232,6 +237,7 @@ def create_dataloader(
             max_doms=config['model']['max_doms'],
             # opt-in: order DOM tokens by earliest-hit time so RoPE sees hit rank
             order_doms_by_time=config['model'].get('order_doms_by_time', False),
+            fast_collate=fast_collate,
         )
     else:
         raise ValueError(

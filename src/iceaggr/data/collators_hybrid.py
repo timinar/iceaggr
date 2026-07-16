@@ -72,7 +72,7 @@ from typing import Callable, Dict, List, TYPE_CHECKING
 
 import torch
 
-from .collators import MAX_SENSOR_ID
+from .collators import MAX_SENSOR_ID, earliest_dom_keep_mask
 from .collators_npe import (
     FEATURE_COLS_NPE,
     _T50_IDX,
@@ -169,6 +169,7 @@ def make_collate_hybrid(
     include_event_context: bool = True,
     normalize_positions: bool = False,
     correct_percentiles: bool = False,
+    fast_collate: bool = False,
 ) -> Callable[[List[Dict[str, torch.Tensor]]], Dict[str, torch.Tensor]]:
     """Factory for the hybrid raw+aggregate DOM collator (256-dim tokens).
 
@@ -268,14 +269,19 @@ def make_collate_hybrid(
 
         needs_subsample = event_dom_counts > max_doms
         if needs_subsample.any():
-            priority = -dom_min_time                                   # earliest = highest
-            keep = torch.ones(dom_vectors.shape[0], dtype=torch.bool)
-            for ev in needs_subsample.nonzero(as_tuple=True)[0]:
-                s = dom_event_starts[ev]
-                e = dom_event_starts[ev + 1]
-                _, top = priority[s:e].topk(max_doms, largest=True)
-                keep[s:e] = False
-                keep[s + top] = True
+            if fast_collate:
+                keep = earliest_dom_keep_mask(
+                    dom_min_time, dom_event_idx, event_dom_counts, max_doms, batch_size
+                )
+            else:
+                priority = -dom_min_time                               # earliest = highest
+                keep = torch.ones(dom_vectors.shape[0], dtype=torch.bool)
+                for ev in needs_subsample.nonzero(as_tuple=True)[0]:
+                    s = dom_event_starts[ev]
+                    e = dom_event_starts[ev + 1]
+                    _, top = priority[s:e].topk(max_doms, largest=True)
+                    keep[s:e] = False
+                    keep[s + top] = True
             kept_idx = keep.nonzero(as_tuple=True)[0]
             dom_vectors = dom_vectors[kept_idx]
             dom_event_idx = dom_event_idx[kept_idx]
@@ -292,9 +298,11 @@ def make_collate_hybrid(
         ev_idx = dom_event_idx[valid]
         d_idx = dom_idx_in_event[valid]
 
-        padded = torch.zeros(batch_size, max_doms, HYBRID_WIDTH, dtype=dom_vectors.dtype)
+        # fast_collate emits bf16 (halves pad zeros-alloc + pinned H2D copy)
+        out_dtype = torch.bfloat16 if fast_collate else dom_vectors.dtype
+        padded = torch.zeros(batch_size, max_doms, HYBRID_WIDTH, dtype=out_dtype)
         mask = torch.zeros(batch_size, max_doms, dtype=torch.bool)
-        padded[ev_idx, d_idx] = dom_vectors[valid]
+        padded[ev_idx, d_idx] = dom_vectors[valid].to(out_dtype)
         mask[ev_idx, d_idx] = True
 
         result = {

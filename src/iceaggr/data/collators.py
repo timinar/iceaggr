@@ -155,6 +155,53 @@ def collate_with_dom_grouping_legacy(
 MAX_SENSOR_ID = 5160
 
 
+def earliest_dom_keep_mask(
+    dom_min_time: torch.Tensor,
+    dom_event_idx: torch.Tensor,
+    event_dom_counts: torch.Tensor,
+    max_doms: int,
+    batch_size: int,
+) -> torch.Tensor:
+    """Vectorized "keep the ``max_doms`` earliest-hit DOMs per event" selection.
+
+    A deterministic, fully-vectorized replacement for the per-event ``torch.topk``
+    subsample loop used by the flat / npe15 / hybrid collators (the ``fast_collate``
+    path). For every event with more than ``max_doms`` DOMs it keeps the
+    ``max_doms`` DOMs with the smallest ``dom_min_time``; ties are broken by
+    ascending position in the (event, sensor_id)-sorted DOM array — i.e. **lowest
+    sensor_id first**.
+
+    This differs from the loop only in tie-breaking: ``torch.topk``'s internal
+    partial-sort order at the cut is implementation-defined and not reproducible
+    (e.g. ``topk([5,3,3,3,1,3], 3)`` returns indices ``[0,3,5]``, not ``[0,1,2]``),
+    whereas this rule is deterministic. The two agree except among DOMs sharing an
+    identical earliest-hit time, which are physically interchangeable — so the
+    ``fast_collate`` output is NOT byte-identical to the default and must be
+    validated (see ``paper/analysis/dataloader_diagnosis.md``) before use.
+
+    Assumes ``dom_event_idx`` is non-decreasing and DOMs within an event are in
+    ascending sensor_id order, as produced by ``torch.unique(..., sorted=True)``.
+
+    Returns a bool mask over all DOMs (all-True for events at/under the cap).
+    """
+    total_doms = dom_min_time.shape[0]
+    if not bool((event_dom_counts > max_doms).any()):
+        return torch.ones(total_doms, dtype=torch.bool)
+    # within-event rank by (min_time ASC, position ASC == sensor_id ASC on ties).
+    # Two stable argsorts: sort by time, then group by event (stable keeps the
+    # time+position order within each event).
+    time_order = torch.argsort(dom_min_time, stable=True)
+    event_order = torch.argsort(dom_event_idx[time_order], stable=True)
+    global_order = time_order[event_order]
+    starts = torch.zeros(batch_size + 1, dtype=torch.long)
+    starts[1:] = event_dom_counts.cumsum(0)
+    sorted_event = dom_event_idx[global_order]
+    rank_sorted = torch.arange(total_doms, dtype=torch.long) - starts[sorted_event]
+    rank = torch.empty(total_doms, dtype=torch.long)
+    rank[global_order] = rank_sorted
+    return rank < max_doms
+
+
 def collate_with_dom_grouping(
     batch: List[Dict[str, torch.Tensor]]
 ) -> Dict[str, torch.Tensor]:
@@ -351,6 +398,7 @@ def make_collate_flat(
     geometry: "GeometryLoader",
     max_pulses_per_dom: int = 84,
     max_doms: int = 128,
+    fast_collate: bool = False,
 ) -> Callable[[List[Dict[str, torch.Tensor]]], Dict[str, torch.Tensor]]:
     """
     Single-pass collator for the flat transformer model.
@@ -369,6 +417,14 @@ def make_collate_flat(
         geometry: GeometryLoader instance with sensor positions
         max_pulses_per_dom: K, first K pulses kept per DOM (default: 84)
         max_doms: max DOMs per event, rest subsampled by earliest time (default: 128)
+        fast_collate: opt-in speedup (default False = byte-identical). When True:
+            (a) the padded output is emitted in bfloat16 instead of float32 —
+            halving the pad-assembly zeros-alloc and the pinned host→device copy,
+            numerically ~equivalent since the model trains under bf16 autocast; and
+            (b) the per-event topk subsample loop is replaced by a vectorized
+            deterministic selection (see earliest_dom_keep_mask). Neither is
+            byte-identical to the default (bf16 rounding; a reproducible sensor_id
+            tie-break vs topk's arbitrary one), so it must be validated before use.
 
     Returns:
         Collate function producing a dict with:
@@ -473,15 +529,20 @@ def make_collate_flat(
 
         needs_subsample = event_dom_counts > max_doms
         if needs_subsample.any():
-            priority = -dom_min_time
-            keep = torch.ones(total_doms, dtype=torch.bool)
+            if fast_collate:
+                keep = earliest_dom_keep_mask(
+                    dom_min_time, dom_event_idx, event_dom_counts, max_doms, batch_size
+                )
+            else:
+                priority = -dom_min_time
+                keep = torch.ones(total_doms, dtype=torch.bool)
 
-            for ev in needs_subsample.nonzero(as_tuple=True)[0]:
-                s = dom_event_starts[ev]
-                e = dom_event_starts[ev + 1]
-                _, top = priority[s:e].topk(max_doms, largest=True)
-                keep[s:e] = False
-                keep[s + top] = True
+                for ev in needs_subsample.nonzero(as_tuple=True)[0]:
+                    s = dom_event_starts[ev]
+                    e = dom_event_starts[ev + 1]
+                    _, top = priority[s:e].topk(max_doms, largest=True)
+                    keep[s:e] = False
+                    keep[s + top] = True
 
             kept_idx = keep.nonzero(as_tuple=True)[0]
             dom_vectors = dom_vectors[kept_idx]
@@ -503,7 +564,11 @@ def make_collate_flat(
         # output stays byte-identical if that invariant is ever broken.
         valid = dom_idx_in_event < max_doms
 
-        padded = torch.zeros(batch_size, max_doms, input_dim, dtype=dom_vectors.dtype)
+        # fast_collate: emit bf16 (halves the zeros-alloc + the pinned H2D copy).
+        out_dtype = torch.bfloat16 if fast_collate else dom_vectors.dtype
+        if out_dtype != dom_vectors.dtype:
+            dom_vectors = dom_vectors.to(out_dtype)
+        padded = torch.zeros(batch_size, max_doms, input_dim, dtype=out_dtype)
         mask = torch.zeros(batch_size, max_doms, dtype=torch.bool)
 
         if bool(valid.all()):

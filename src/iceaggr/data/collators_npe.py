@@ -57,7 +57,7 @@ from typing import Callable, Dict, List, Tuple, TYPE_CHECKING
 
 import torch
 
-from .collators import MAX_SENSOR_ID
+from .collators import MAX_SENSOR_ID, earliest_dom_keep_mask
 
 if TYPE_CHECKING:
     from .geometry import GeometryLoader
@@ -277,6 +277,7 @@ def make_collate_npe15(
     max_doms: int = 128,
     normalize_positions: bool = False,
     correct_percentiles: bool = False,
+    fast_collate: bool = False,
 ) -> Callable[[List[Dict[str, torch.Tensor]]], Dict[str, torch.Tensor]]:
     """Factory for the NPE-15 summary-statistics collator.
 
@@ -292,6 +293,9 @@ def make_collate_npe15(
             already the /500-normalized file — the production default).
         correct_percentiles: emit genuine charge-cumulative quantile times for
             t_20/t_50 instead of reproducing the reference's t_first collapse.
+        fast_collate: opt-in speedup (default False = byte-identical). When True,
+            emit bfloat16 tokens and use the vectorized deterministic subsample
+            (earliest_dom_keep_mask). Not byte-identical — validate before use.
 
     Returns:
         collate_fn producing dict with dom_vectors (B, max_doms, 15),
@@ -328,14 +332,19 @@ def make_collate_npe15(
 
         needs_subsample = event_dom_counts > max_doms
         if needs_subsample.any():
-            priority = -dom_min_time                            # earliest = highest
-            keep = torch.ones(dom_vectors.shape[0], dtype=torch.bool)
-            for ev in needs_subsample.nonzero(as_tuple=True)[0]:
-                s = dom_event_starts[ev]
-                e = dom_event_starts[ev + 1]
-                _, top = priority[s:e].topk(max_doms, largest=True)
-                keep[s:e] = False
-                keep[s + top] = True
+            if fast_collate:
+                keep = earliest_dom_keep_mask(
+                    dom_min_time, dom_event_idx, event_dom_counts, max_doms, batch_size
+                )
+            else:
+                priority = -dom_min_time                        # earliest = highest
+                keep = torch.ones(dom_vectors.shape[0], dtype=torch.bool)
+                for ev in needs_subsample.nonzero(as_tuple=True)[0]:
+                    s = dom_event_starts[ev]
+                    e = dom_event_starts[ev + 1]
+                    _, top = priority[s:e].topk(max_doms, largest=True)
+                    keep[s:e] = False
+                    keep[s + top] = True
             kept_idx = keep.nonzero(as_tuple=True)[0]
             dom_vectors = dom_vectors[kept_idx]
             dom_event_idx = dom_event_idx[kept_idx]
@@ -352,9 +361,11 @@ def make_collate_npe15(
         ev_idx = dom_event_idx[valid]
         d_idx = dom_idx_in_event[valid]
 
-        padded = torch.zeros(batch_size, max_doms, INPUT_DIM_NPE, dtype=dom_vectors.dtype)
+        # fast_collate emits bf16 (halves pad zeros-alloc + pinned H2D copy)
+        out_dtype = torch.bfloat16 if fast_collate else dom_vectors.dtype
+        padded = torch.zeros(batch_size, max_doms, INPUT_DIM_NPE, dtype=out_dtype)
         mask = torch.zeros(batch_size, max_doms, dtype=torch.bool)
-        padded[ev_idx, d_idx] = dom_vectors[valid]
+        padded[ev_idx, d_idx] = dom_vectors[valid].to(out_dtype)
         mask[ev_idx, d_idx] = True
 
         result = {
