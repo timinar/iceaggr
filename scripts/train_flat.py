@@ -47,6 +47,7 @@ from iceaggr.models import (
     angles_to_unit_vector,
 )
 from iceaggr.utils import get_logger
+from iceaggr.utils.muon import Muon, MultiOptimizer, MultiScheduler, split_muon_params
 
 logger = get_logger(__name__)
 
@@ -268,6 +269,73 @@ def _amp_dtype(config: dict) -> torch.dtype:
     """Pick autocast dtype from config (default fp16; 'bf16' opt-in)."""
     name = str(config['training'].get('amp_dtype', 'fp16')).lower()
     return torch.bfloat16 if name in ('bf16', 'bfloat16') else torch.float16
+
+
+def _one_cycle(optimizer, max_lr, total_steps, pct_start):
+    """OneCycleLR with the project's fixed div-factor conventions."""
+    return torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=max_lr,
+        total_steps=total_steps,
+        pct_start=pct_start,
+        anneal_strategy='cos',
+        div_factor=25.0,          # Initial LR = max_lr / 25
+        final_div_factor=1000.0,  # Final LR = max_lr / 1000
+    )
+
+
+def build_optimizer_and_scheduler(model, config, total_steps, pct_start):
+    """Build the optimizer + OneCycleLR scheduler from config.
+
+    ``training.optimizer`` selects the path:
+
+    - ``adamw`` (default): a single AdamW over all parameters wrapped by one
+      OneCycleLR — byte-identical to the historical training setup.
+    - ``muon``: Muon on the 2D weight matrices inside ``model.blocks`` (attention
+      + FFN), with an AdamW side-group on everything else (CLS token, input
+      projection, head, per-layer scalars, norms/biases). Each optimizer gets its
+      own OneCycleLR sharing the same schedule shape (``total_steps``/``pct_start``),
+      driven together through MultiOptimizer / MultiScheduler. Muon uses
+      ``training.muon_lr`` (default 0.02) / ``training.muon_momentum`` (default
+      0.95); the AdamW side-group keeps ``training.lr``.
+    """
+    lr = float(config['training']['lr'])
+    weight_decay = float(config['training']['weight_decay'])
+    opt_name = str(config['training'].get('optimizer', 'adamw')).lower()
+
+    if opt_name == 'adamw':
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        scheduler = _one_cycle(optimizer, lr, total_steps, pct_start)
+        return optimizer, scheduler
+
+    if opt_name == 'muon':
+        # fp16 loss-scaling is not threaded through MultiOptimizer; Muon (like
+        # nanochat) runs under bf16, so require it rather than train silently wrong.
+        if config['training'].get('use_amp', False) and _amp_dtype(config) == torch.float16:
+            raise ValueError(
+                "training.optimizer: muon requires training.amp_dtype: bf16 "
+                "(the fp16 GradScaler path is not wired through MultiOptimizer)."
+            )
+        muon_lr = float(config['training'].get('muon_lr', 0.02))
+        muon_momentum = float(config['training'].get('muon_momentum', 0.95))
+        muon_params, adamw_params, muon_names = split_muon_params(model)
+        logger.info(
+            f"Muon optimizer: {len(muon_params)} block weight matrices → Muon "
+            f"(lr={muon_lr}, momentum={muon_momentum}); "
+            f"{len(adamw_params)} params → AdamW (lr={lr})"
+        )
+        adamw_opt = torch.optim.AdamW(adamw_params, lr=lr, weight_decay=weight_decay)
+        muon_opt = Muon(muon_params, lr=muon_lr, momentum=muon_momentum, weight_decay=weight_decay)
+        # AdamW first so scheduler.get_last_lr()[0] stays the base LR (as in every
+        # AdamW run); the two schedulers move in lockstep on the same geometry.
+        optimizer = MultiOptimizer([adamw_opt, muon_opt])
+        scheduler = MultiScheduler([
+            _one_cycle(adamw_opt, lr, total_steps, pct_start),
+            _one_cycle(muon_opt, muon_lr, total_steps, pct_start),
+        ])
+        return optimizer, scheduler
+
+    raise ValueError(f"Unknown training.optimizer: {opt_name!r} (use 'adamw' or 'muon')")
 
 
 def compute_kappa_reg(config: dict, global_step: int, total_steps: int) -> float:
@@ -541,27 +609,13 @@ def main():
         )
         logger.info(f"Validation: {len(val_loader.dataset):,} events, {len(val_loader):,} batches")
 
-    # Optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(config['training']['lr']),
-        weight_decay=float(config['training']['weight_decay']),
-    )
-
-    # LR scheduler - OneCycleLR with warmup
+    # LR schedule geometry - OneCycleLR with warmup
     total_steps = len(loader) * config['training']['epochs']
     warmup_steps = config['training'].get('warmup_steps', 1000)
     pct_start = min(warmup_steps / total_steps, 0.3)  # Cap at 30% of training
 
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=float(config['training']['lr']),
-        total_steps=total_steps,
-        pct_start=pct_start,
-        anneal_strategy='cos',
-        div_factor=25.0,        # Initial LR = max_lr / 25
-        final_div_factor=1000.0,  # Final LR = max_lr / 1000
-    )
+    # Optimizer + scheduler (AdamW default; Muon opt-in via training.optimizer)
+    optimizer, scheduler = build_optimizer_and_scheduler(model, config, total_steps, pct_start)
 
     # AMP scaler
     # GradScaler is fp16-only; bf16 has fp32-equivalent exponent range and

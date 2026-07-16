@@ -1,0 +1,74 @@
+# v2 none K=84 ~5M params, K=3 vMF mixture, UNCLAMPED softplus + annealed
+# kappa_reg + combined loss (NLL + vmf_angular_weight · angular_distance),
+# trained with the MUON optimizer instead of AdamW.
+#
+# Full-scale clone of train_flat_v2_vmf_K3_5M_unclamped_combined.yaml (bs4096);
+# the ONLY differences are training.optimizer: muon (+ muon_lr / muon_momentum)
+# and the run name / tags. This is the config for the A100 fleet — Muon trains
+# the 6 block weight matrices per layer (attention c_q/c_k/c_v/c_proj + FFN
+# c_fc/c_proj), with an AdamW side-group on the CLS token, vMF head, and the
+# per-layer resid/x0 scalars.
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0              # safety net only (κ=10000 ↔ σ ≈ 0.6°)
+  vmf_kappa_reg: 1.0e-4               # starting value
+  vmf_kappa_reg_final: 0.0            # annealed to zero
+  vmf_kappa_reg_anneal_fraction: 0.3  # linear anneal over first 30% of steps
+  vmf_angular_weight: 0.5             # λ for combined NLL + angular-distance loss
+
+training:
+  optimizer: muon           # Muon on block 2D matrices + AdamW side-group
+  muon_lr: 0.02             # Muon LR (nanochat default); tune from muon_tune_10M
+  muon_momentum: 0.95
+  epochs: 10
+  batch_size: 4096
+  lr: 3e-4                  # AdamW side-group LR (CLS/head/scalars)
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16           # Muon requires bf16 (fp16 GradScaler not wired)
+
+data:
+  max_events: 200000000
+  val_events: 100000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-none-K84-muon-combined-10ep
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - input-none
+    - vmf
+    - mixture-3
+    - kappa-unclamped
+    - kappa-reg-anneal
+    - combined-loss
+    - muon
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: null
