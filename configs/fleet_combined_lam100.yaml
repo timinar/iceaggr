@@ -1,0 +1,92 @@
+# v2 none K=84 ~5M params, K=3 vMF mixture, UNCLAMPED softplus + annealed
+# kappa_reg, PLUS a combined loss = NLL + vmf_angular_weight · angular_distance.
+#
+# Identical to train_flat_v2_vmf_K3_5M_unclamped.yaml except for the added
+# vmf_angular_weight term (and the run name / tags).
+#
+# Motivation: the 2nd-place Kaggle solution trained the vMF NLL alongside the
+# competition angular-distance metric on the point estimate, and reported this
+# combined objective worth ~55 bps over NLL alone. We already emit a κ-weighted
+# mean point estimate (vmf_weighted_mean); vmf_angular_weight adds
+#   λ · mean(arccos(clamp(⟨point_estimate, truth⟩)))
+# to the NLL, with the gradient flowing through the point estimate into μ/κ/
+# weights. λ=0.5 is the starting guess (the launcher may sweep λ).
+#
+# Underlying κ parameterization is unchanged from the unclamped base:
+#   κ = softplus(raw_kappa) + κ_min, no upper clamp; annealed kappa_reg.
+#
+# Comparison points (held-out 656-659 ≥1000 pulses):
+#   - K=3 mix base (clamped):        7.72° / 2.81°
+#   - K=3 mix finetune (clamped):    6.82° / 1.96°
+#   - K=3 unclamped base:            ?
+#   - K=3 unclamped combined (this): ?
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0              # safety net only — non-binding for any
+                                      # physically meaningful event (κ=10000
+                                      # ↔ σ ≈ 0.6° on S²; MLE κ for our best
+                                      # 2° events is ~1600). Bounds the
+                                      # per-step gradient on μ (∂NLL/∂μ ∝ κ)
+                                      # without capping training-time κ in
+                                      # the useful range.
+  vmf_kappa_reg: 1.0e-4               # starting value
+  vmf_kappa_reg_final: 0.0            # annealed to zero
+  vmf_kappa_reg_anneal_fraction: 0.3  # linear anneal over first 30% of steps
+  vmf_angular_weight: 1.0             # λ for the combined NLL + angular-distance
+                                      # loss (0.0 → pure NLL, byte-identical)
+
+training:
+  epochs: 10
+  batch_size: 4096
+  lr: 3e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16            # fp32-range mantissa, no overflow on κ-scaled
+                             # backward intermediates (κ_max=10000 makes fp16
+                             # marginal). Same speed on H100.
+
+data:
+  fast_collate: true
+  max_events: 200000000
+  val_events: 100000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-combined-lam100
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - input-none
+    - vmf
+    - mixture-3
+    - kappa-unclamped
+    - kappa-reg-anneal
+    - combined-loss
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: null
