@@ -138,6 +138,32 @@ def create_model(config: dict, device: str) -> nn.Module:
     return model
 
 
+def _worker_init_fn(worker_id: int) -> None:
+    """Pin each DataLoader worker to a single torch intra-op thread.
+
+    Two problems, one fix:
+
+    1. **Oversubscription.** The flat collator is torch-heavy (cat / unique /
+       argsort / scatter, all multithreaded). By default every worker inherits
+       torch's process-wide num_threads (≈ half the core count), so ``num_workers``
+       workers spawn ``num_workers × threads`` intra-op threads on ``cores`` CPUs —
+       e.g. 8 workers × 32 = 256 threads on 64 cores — which thrashes the scheduler
+       and starves the GPU.
+    2. **Fork-safety.** torch's intra-op (OpenMP) threadpool is not fork-safe: a
+       worker that runs a *multi-threaded* torch op after fork can **deadlock** on
+       the first `torch.unique`/`argsort` (observed here — it hangs intermittently
+       depending on the parent's pool state at fork). Single-threaded ops never
+       touch the parallel pool, so `set_num_threads(1)` removes the hazard
+       entirely.
+
+    One collate at 1 thread already runs faster per core than at 8/32 (the collate
+    parallelizes only sub-linearly), so this costs nothing in aggregate throughput
+    with a handful of workers — scale cores by adding *workers* (processes are
+    fork-safe), not threads.
+    """
+    torch.set_num_threads(1)
+
+
 def create_dataloader(
     config: dict,
     geometry: GeometryLoader,
@@ -185,6 +211,7 @@ def create_dataloader(
         pin_memory=True,
         persistent_workers=num_workers > 0,
         prefetch_factor=4 if num_workers > 0 else None,
+        worker_init_fn=_worker_init_fn if num_workers > 0 else None,
     )
 
     return loader, sampler

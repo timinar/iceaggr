@@ -6,9 +6,11 @@ legacy vs vectorized DOM grouping implementations.
 import pytest
 import torch
 from iceaggr.data import (
+    GeometryLoader,
     IceCubeDataset,
     collate_with_dom_grouping,
     collate_with_dom_grouping_legacy,
+    make_collate_flat,
 )
 
 
@@ -275,3 +277,75 @@ class TestDOMOrderPreservation:
             dom_at_changes = dom_indices[changes]
             assert (dom_at_changes[1:] > dom_at_changes[:-1]).all(), \
                 "DOM indices should be monotonically increasing"
+
+
+class TestFlatCollatorPadAssembly:
+    """Guard the pad-assembly fast path in make_collate_flat.
+
+    After subsampling every event holds <= max_doms DOMs, so the internal
+    ``valid = dom_idx_in_event < max_doms`` mask is always all-True and the
+    collator scatters DOM vectors straight into the padded tensor (skipping a
+    full copy). These tests lock in the resulting invariants for both the
+    no-subsample and subsample paths, so a future change to that fast path can't
+    silently corrupt the output.
+    """
+
+    @pytest.fixture
+    def geometry(self, tmp_path):
+        lines = ["sensor_id,x,y,z"]
+        for sid in range(40):
+            lines.append(f"{sid},{sid * 0.001},{sid * 0.002},{sid * 0.003}")
+        csv_path = tmp_path / "geom.csv"
+        csv_path.write_text("\n".join(lines) + "\n")
+        return GeometryLoader(str(csv_path))
+
+    @staticmethod
+    def _event(event_id, n_doms, base_time=0.0):
+        """One event with n_doms distinct DOMs (sensor_ids 0..n_doms-1), one pulse
+        each; earlier sensor_ids get earlier times so the earliest-time subsample
+        keeps the low sensor_ids."""
+        rows = [[base_time + sid, 1.0, float(sid), 0.0] for sid in range(n_doms)]
+        return {
+            "pulse_features": torch.tensor(rows, dtype=torch.float32),
+            "event_id": torch.tensor(event_id, dtype=torch.long),
+            "target": torch.tensor([0.1, 0.2], dtype=torch.float32),
+        }
+
+    def _check(self, out, expected_counts, max_doms, input_dim):
+        mask = out["padding_mask"]
+        vecs = out["dom_vectors"]
+        assert vecs.shape == (len(expected_counts), max_doms, input_dim)
+        for ev, n in enumerate(expected_counts):
+            kept = min(n, max_doms)
+            # exactly `kept` valid tokens, contiguous from position 0
+            assert int(mask[ev].sum()) == kept
+            assert mask[ev, :kept].all()
+            assert not mask[ev, kept:].any()
+            # padded (masked-out) rows are exactly zero
+            assert torch.equal(vecs[ev][~mask[ev]], torch.zeros(max_doms - kept, input_dim))
+
+    def test_no_subsample(self, geometry):
+        max_doms = 16
+        K = 4
+        batch = [self._event(0, 5), self._event(1, 12), self._event(2, 1)]
+        collate = make_collate_flat(geometry, max_pulses_per_dom=K, max_doms=max_doms)
+        out = collate(batch)
+        self._check(out, [5, 12, 1], max_doms, 4 + 3 * K)
+
+    def test_with_subsample(self, geometry):
+        max_doms = 8
+        K = 4
+        # event 1 has 20 DOMs > max_doms -> must subsample to the 8 earliest
+        batch = [self._event(0, 5), self._event(1, 20), self._event(2, 8)]
+        collate = make_collate_flat(geometry, max_pulses_per_dom=K, max_doms=max_doms)
+        out = collate(batch)
+        self._check(out, [5, 20, 8], max_doms, 4 + 3 * K)
+
+    def test_all_events_oversized(self, geometry):
+        """Every event exceeds max_doms: the fast path must still hold."""
+        max_doms = 4
+        K = 2
+        batch = [self._event(i, 30, base_time=i * 100.0) for i in range(3)]
+        collate = make_collate_flat(geometry, max_pulses_per_dom=K, max_doms=max_doms)
+        out = collate(batch)
+        self._check(out, [30, 30, 30], max_doms, 4 + 3 * K)
