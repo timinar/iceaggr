@@ -398,6 +398,7 @@ def make_collate_flat(
     geometry: "GeometryLoader",
     max_pulses_per_dom: int = 84,
     max_doms: int = 128,
+    order_doms_by_time: bool = False,
     fast_collate: bool = False,
 ) -> Callable[[List[Dict[str, torch.Tensor]]], Dict[str, torch.Tensor]]:
     """
@@ -417,6 +418,12 @@ def make_collate_flat(
         geometry: GeometryLoader instance with sensor positions
         max_pulses_per_dom: K, first K pulses kept per DOM (default: 84)
         max_doms: max DOMs per event, rest subsampled by earliest time (default: 128)
+        order_doms_by_time: if True, order the kept DOM tokens within each event by
+            ascending dom_min_time (earliest-hit DOM at token position 0) so that
+            sequence position = Cherenkov hit rank — useful for RoPE. If False
+            (default), DOM tokens keep the sensor_id ordering (byte-identical to the
+            historical behavior). The set of kept DOMs is identical either way; only
+            the within-event token order changes.
         fast_collate: opt-in speedup (default False = byte-identical). When True:
             (a) the padded output is emitted in bfloat16 instead of float32 —
             halving the pad-assembly zeros-alloc and the pinned host→device copy,
@@ -527,6 +534,10 @@ def make_collate_flat(
             torch.arange(total_doms, dtype=torch.long) - dom_event_starts[dom_event_idx]
         )
 
+        # dom_min_time travels alongside dom_vectors/dom_event_idx so the optional
+        # time-ordering below sees the final kept set after any subsampling.
+        kept_dom_min_time = dom_min_time
+
         needs_subsample = event_dom_counts > max_doms
         if needs_subsample.any():
             if fast_collate:
@@ -547,6 +558,7 @@ def make_collate_flat(
             kept_idx = keep.nonzero(as_tuple=True)[0]
             dom_vectors = dom_vectors[kept_idx]
             dom_event_idx = dom_event_idx[kept_idx]
+            kept_dom_min_time = kept_dom_min_time[kept_idx]
 
             clamped = event_dom_counts.clamp(max=max_doms)
             kept_starts = torch.zeros(batch_size + 1, dtype=torch.long)
@@ -555,6 +567,31 @@ def make_collate_flat(
                 torch.arange(dom_vectors.shape[0], dtype=torch.long)
                 - kept_starts[dom_event_idx]
             )
+
+        if order_doms_by_time:
+            # Reorder kept DOM tokens within each event by ascending dom_min_time,
+            # so token position 0 = earliest-hit DOM. The kept set (and therefore
+            # dom_vectors / mask / event membership) is unchanged; only the
+            # within-event token index changes. dom_event_idx is non-decreasing, so
+            # a single stable argsort on (event, time) yields the per-event time
+            # order; we then invert it to a within-event rank. Stable on ties keeps
+            # the original sensor_id order as the tie-breaker.
+            n_kept = dom_vectors.shape[0]
+            time_sort = torch.argsort(kept_dom_min_time, stable=True)
+            event_sort = torch.argsort(dom_event_idx[time_sort], stable=True)
+            global_order = time_sort[event_sort]  # DOMs grouped by event, time-sorted
+            # global_order[r] = original kept-index that lands at sequence rank r;
+            # within-event rank = r - (start of its event among the sorted DOMs).
+            sorted_event_idx = dom_event_idx[global_order]
+            sorted_starts = torch.zeros(batch_size + 1, dtype=torch.long)
+            kept_counts = torch.bincount(dom_event_idx, minlength=batch_size)
+            sorted_starts[1:] = kept_counts.cumsum(0)
+            ranks_sorted = (
+                torch.arange(n_kept, dtype=torch.long)
+                - sorted_starts[sorted_event_idx]
+            )
+            dom_idx_in_event = torch.empty(n_kept, dtype=torch.long)
+            dom_idx_in_event[global_order] = ranks_sorted
 
         # After subsampling every event holds <= max_doms DOMs, so dom_idx_in_event
         # is always in [0, max_doms) and `valid` is all-True. In that case the
