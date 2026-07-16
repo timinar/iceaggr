@@ -23,7 +23,13 @@ from torch.utils.data import DataLoader
 PROJECT_ROOT = Path("/lustre/hpc/pheno/inar/iceaggr")
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from iceaggr.data import IceCubeDataset, GeometryLoader, make_collate_flat
+from iceaggr.data import (
+    IceCubeDataset,
+    GeometryLoader,
+    make_collate_flat,
+    make_collate_npe15,
+    make_collate_hybrid,
+)
 from iceaggr.models import FlatTransformerV2
 from iceaggr.utils import get_logger
 
@@ -53,7 +59,8 @@ def build_model_config_from_ckpt(ckpt_cfg: dict) -> dict:
     }
     for k in (
         "vmf_components", "vmf_kappa_min", "vmf_kappa_max", "vmf_kappa_reg",
-        "vmf_kappa_param", "vmf_kappa_temperature",
+        "vmf_kappa_param", "vmf_kappa_temperature", "vmf_angular_weight",
+        "input_dim",
     ):
         if k in m:
             cfg[k] = m[k]
@@ -99,11 +106,28 @@ def run(args):
     logger.info(f"Events: {len(dataset):,}"
                 + (f" (min_pulses={args.min_pulses})" if args.min_pulses else ""))
 
-    collate_fn = make_collate_flat(
-        geometry,
-        max_pulses_per_dom=model_cfg["max_pulses_per_dom"],
-        max_doms=model_cfg["max_doms"],
-    )
+    data_cfg = ckpt["config"].get("data", {}) if isinstance(ckpt.get("config"), dict) else {}
+    tokenization = data_cfg.get("tokenization")
+    if tokenization == "npe15":
+        collate_fn = make_collate_npe15(
+            geometry,
+            max_doms=model_cfg["max_doms"],
+            correct_percentiles=data_cfg.get("npe_correct_percentiles", False),
+        )
+    elif tokenization == "hybrid":
+        collate_fn = make_collate_hybrid(
+            geometry,
+            max_doms=model_cfg["max_doms"],
+            mode=data_cfg.get("hybrid_mode", "full"),
+            include_event_context=data_cfg.get("hybrid_include_event_context", True),
+            correct_percentiles=data_cfg.get("npe_correct_percentiles", False),
+        )
+    else:
+        collate_fn = make_collate_flat(
+            geometry,
+            max_pulses_per_dom=model_cfg["max_pulses_per_dom"],
+            max_doms=model_cfg["max_doms"],
+        )
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=False,
         num_workers=4, collate_fn=collate_fn,
