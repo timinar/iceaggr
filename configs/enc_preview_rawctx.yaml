@@ -1,0 +1,72 @@
+# T2 preview — RAW + EVENT-CONTEXT @ 10M (context-isolation ablation).
+#
+# The "why" leg of paper/analysis/hiE_improvement_plan.md T2 / candidate 4(a):
+# decompose humanstats' hi-E edge into *event context* vs *full-pulse aggregation*.
+# This token = base(4) + 6 event-context dims (CoG-relative xyz, DOM first/last-hit
+# time on the event-median-t reference, event time anchor) + 82 raw pulse triplets,
+# with NO charge-weighted aggregates (no c_total, t_std, t_mean). If raw+context
+# alone closes >60% of the raw->humanstats hi-E gap, event context is the driver
+# and a lean raw+context token may beat the full hybrid at lower width.
+#
+# PROTOCOL / HEAD / LOSS identical to enc_preview_hybrid_none.yaml (enc-control
+# protocol + combined loss + annealed reg); the ONLY change is the tokenization
+# mode (hybrid_mode: context_only). input_mode none — the token is still 256 wide.
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84      # default input_dim = 4 + 3*84 = 256 (= d_model)
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0
+  vmf_kappa_reg: 1.0e-4
+  vmf_kappa_reg_final: 0.0
+  vmf_kappa_reg_anneal_fraction: 0.3
+  vmf_angular_weight: 0.5
+
+training:
+  epochs: 10
+  batch_size: 256
+  lr: 1e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16
+
+data:
+  tokenization: hybrid
+  hybrid_mode: context_only   # base(4) + 6 event-context + 82 raw triplets, NO aggregates
+  max_events: 10000000
+  val_events: 50000
+  num_workers: 6
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: enc-preview-rawctx
+  tags:
+    - encoding-comparison-preview
+    - raw-plus-context
+    - context-isolation
+    - input-none
+    - vmf-K3
+    - kappa-unclamped
+    - combined-loss
+
+checkpoint:
+  dir: checkpoints/enc-preview-rawctx
+  save_every: 5
+  resume: null

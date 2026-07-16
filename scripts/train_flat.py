@@ -37,6 +37,7 @@ from iceaggr.data import (
     GeometryLoader,
     make_collate_flat,
     make_collate_npe15,
+    make_collate_hybrid,
     BatchAwareSampler,
 )
 from iceaggr.models import (
@@ -187,6 +188,17 @@ def create_dataloader(
             normalize_positions=config['data'].get('npe_normalize_positions', False),
             correct_percentiles=config['data'].get('npe_correct_percentiles', False),
         )
+    elif tokenization == 'hybrid':
+        # 256-dim raw+aggregate DOM tokens (input_mode none/linear, no input_dim
+        # needed: default 4+3*max_pulses_per_dom=256 with max_pulses_per_dom=84).
+        collate_fn = make_collate_hybrid(
+            geometry,
+            max_doms=config['model']['max_doms'],
+            mode=config['data'].get('hybrid_mode', 'full'),
+            include_event_context=config['data'].get('hybrid_include_event_context', True),
+            normalize_positions=config['data'].get('npe_normalize_positions', False),
+            correct_percentiles=config['data'].get('npe_correct_percentiles', False),
+        )
     elif tokenization == 'flat':
         collate_fn = make_collate_flat(
             geometry,
@@ -196,7 +208,9 @@ def create_dataloader(
             order_doms_by_time=config['model'].get('order_doms_by_time', False),
         )
     else:
-        raise ValueError(f"Unknown data.tokenization: {tokenization!r} (use 'flat' or 'npe15')")
+        raise ValueError(
+            f"Unknown data.tokenization: {tokenization!r} (use 'flat', 'npe15', or 'hybrid')"
+        )
 
     loader = DataLoader(
         dataset,

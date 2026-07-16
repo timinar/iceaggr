@@ -1,0 +1,70 @@
+# T2 preview — HYBRID @ 10M, input_mode LINEAR (learned input mix).
+#
+# Twin of enc_preview_hybrid_none.yaml with input_mode: linear -> Linear(256, 256)
+# before the trunk. Tests the plan's Q1 concern: in the 'none' concat the 12
+# aggregate stats are only ~6% of the 256 width and can be swamped at init by the
+# 240 raw-pulse dims; a learned linear can rebalance the modalities. If linear
+# beats none at 10M, the full T1 base should use linear (or a per-group projection).
+#
+# PROTOCOL / HEAD / LOSS are identical to enc_preview_hybrid_none.yaml — the ONLY
+# difference is input_mode. See that file's header for the enc-control protocol and
+# the reference-leg matching caveat.
+
+model:
+  version: v2
+  input_mode: linear          # Linear(256, 256) input projection
+  max_pulses_per_dom: 84      # default input_dim = 4 + 3*84 = 256
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0
+  vmf_kappa_reg: 1.0e-4
+  vmf_kappa_reg_final: 0.0
+  vmf_kappa_reg_anneal_fraction: 0.3
+  vmf_angular_weight: 0.5
+
+training:
+  epochs: 10
+  batch_size: 256
+  lr: 1e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16
+
+data:
+  tokenization: hybrid
+  hybrid_mode: full
+  max_events: 10000000
+  val_events: 50000
+  num_workers: 6
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: enc-preview-hybrid-linear
+  tags:
+    - encoding-comparison-preview
+    - hybrid
+    - raw-plus-aggregate
+    - input-linear
+    - vmf-K3
+    - kappa-unclamped
+    - combined-loss
+
+checkpoint:
+  dir: checkpoints/enc-preview-hybrid-linear
+  save_every: 5
+  resume: null

@@ -21,6 +21,12 @@ from .collators_npe import (
     normalize_dom_features_npe,
     make_collate_npe15,
 )
+from .collators_hybrid import (
+    HYBRID_WIDTH,
+    K_RAW_FULL,
+    K_RAW_CONTEXT,
+    make_collate_hybrid,
+)
 from .geometry import GeometryLoader
 
 __all__ = [
@@ -45,6 +51,11 @@ __all__ = [
     "compute_dom_features_npe",
     "normalize_dom_features_npe",
     "make_collate_npe15",
+    # Hybrid raw+aggregate tokenization
+    "HYBRID_WIDTH",
+    "K_RAW_FULL",
+    "K_RAW_CONTEXT",
+    "make_collate_hybrid",
     # Geometry
     "GeometryLoader",
 ]
