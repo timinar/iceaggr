@@ -495,15 +495,25 @@ def make_collate_flat(
                 - kept_starts[dom_event_idx]
             )
 
+        # After subsampling every event holds <= max_doms DOMs, so dom_idx_in_event
+        # is always in [0, max_doms) and `valid` is all-True. In that case the
+        # boolean-mask gathers below (notably dom_vectors[valid], a full copy of
+        # the ~O(100 MB) DOM-feature tensor) are pure overhead — scatter straight
+        # from the source tensors instead. The general-path fallback is kept so the
+        # output stays byte-identical if that invariant is ever broken.
         valid = dom_idx_in_event < max_doms
-        ev_idx = dom_event_idx[valid]
-        d_idx = dom_idx_in_event[valid]
 
         padded = torch.zeros(batch_size, max_doms, input_dim, dtype=dom_vectors.dtype)
         mask = torch.zeros(batch_size, max_doms, dtype=torch.bool)
 
-        padded[ev_idx, d_idx] = dom_vectors[valid]
-        mask[ev_idx, d_idx] = True
+        if bool(valid.all()):
+            padded[dom_event_idx, dom_idx_in_event] = dom_vectors
+            mask[dom_event_idx, dom_idx_in_event] = True
+        else:
+            ev_idx = dom_event_idx[valid]
+            d_idx = dom_idx_in_event[valid]
+            padded[ev_idx, d_idx] = dom_vectors[valid]
+            mask[ev_idx, d_idx] = True
 
         # --- Build result ---
         result = {
