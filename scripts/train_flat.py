@@ -298,6 +298,14 @@ def create_dataloader(
             f"Unknown data.tokenization: {tokenization!r} (use 'flat', 'npe15', or 'hybrid')"
         )
 
+    # Seeded runs give the loader its own RNG so building an iterator (which
+    # draws the workers' base seed) never consumes the global torch RNG — that
+    # keeps the dropout stream continuous across a checkpoint resume. Unseeded
+    # runs keep the historical behaviour (global RNG).
+    loader_gen = None
+    if _seed is not None:
+        loader_gen = torch.Generator()
+        loader_gen.manual_seed(int(_seed))
     loader = DataLoader(
         dataset,
         batch_size=config['training']['batch_size'],
@@ -308,6 +316,7 @@ def create_dataloader(
         persistent_workers=num_workers > 0,
         prefetch_factor=4 if num_workers > 0 else None,
         worker_init_fn=_worker_init_fn if num_workers > 0 else None,
+        generator=loader_gen,
     )
 
     return loader, sampler
@@ -497,8 +506,12 @@ def train_epoch(
                 y_pred = outputs['direction'] if isinstance(outputs, dict) else outputs
                 loss = angular_distance_loss(y_pred, targets)
 
-        # Backward with gradient scaling (divide for accumulation; accum=1 is a no-op)
-        scaler.scale(loss / grad_accum).backward()
+        # Backward with gradient scaling. Divide by the accumulation window size so
+        # the summed gradient is a mean; the epoch's last window may be shorter
+        # (n_batches % grad_accum micro-batches) and is divided by its own size.
+        tail = n_batches % grad_accum
+        denom = tail if (tail and actual_batch >= n_batches - tail) else grad_accum
+        scaler.scale(loss / denom).backward()
 
         # Optimizer step every grad_accum micro-batches (and at epoch end). The
         # epoch-end flush is keyed on actual_batch: after a mid-epoch resume the

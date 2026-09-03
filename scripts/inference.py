@@ -136,12 +136,16 @@ def run_inference(args):
     # a hybrid or npe15 model fed flat tokens would run but predict garbage.
     _d = _cfg.get("data", {})
     tokenization = _d.get("tokenization", "flat")
+    # fast_collate changes the token dtype (bf16) and overflow-DOM tie-breaking,
+    # so inference must use the same setting the model was trained with.
+    fast_collate = bool(_d.get("fast_collate", False))
     if tokenization == "npe15":
         collate_fn = make_collate_npe15(
             geometry,
             max_doms=config["max_doms"],
             normalize_positions=_d.get("npe_normalize_positions", False),
             correct_percentiles=_d.get("npe_correct_percentiles", False),
+            fast_collate=fast_collate,
         )
     elif tokenization == "hybrid":
         collate_fn = make_collate_hybrid(
@@ -151,15 +155,22 @@ def run_inference(args):
             include_event_context=_d.get("hybrid_include_event_context", True),
             normalize_positions=_d.get("npe_normalize_positions", False),
             correct_percentiles=_d.get("npe_correct_percentiles", False),
+            fast_collate=fast_collate,
         )
-    else:
+    elif tokenization == "flat":
         collate_fn = make_collate_flat(
             geometry,
             max_pulses_per_dom=config["max_pulses_per_dom"],
             max_doms=config["max_doms"],
             order_doms_by_time=_order_time,
+            fast_collate=fast_collate,
         )
-    logger.info(f"Tokenization: {tokenization}")
+    else:
+        raise ValueError(f"Unknown data.tokenization in checkpoint: {tokenization!r}")
+    # Autocast precision as trained (training.amp_dtype: fp16 default, bf16 for Muon runs)
+    _t = _cfg.get("training", {})
+    amp_dtype = torch.bfloat16 if str(_t.get("amp_dtype", "fp16")).lower() in ("bf16", "bfloat16") else torch.float16
+    logger.info(f"Tokenization: {tokenization} (fast_collate={fast_collate}), autocast {amp_dtype}")
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -184,7 +195,7 @@ def run_inference(args):
             event_ids = batch["event_ids"].numpy()
             targets = batch["targets"].numpy()  # (B, 2) [azimuth_true, zenith_true]
 
-            with torch.amp.autocast("cuda", enabled=(device == "cuda")):
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=(device == "cuda")):
                 out = model(dom_vectors, padding_mask)
             # FlatTransformerV2 now returns a dict; the point estimate is the
             # (kappa-weighted, for vMF) unit direction under the 'direction' key.

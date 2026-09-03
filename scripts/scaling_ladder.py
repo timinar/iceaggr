@@ -208,9 +208,14 @@ def main():
         job = qdir / f"{args.name}.sh"
         # Self-locating: the job lives in <root>/queue/<class>/{pending,running}/,
         # so the repo root is three levels up from the script's own directory.
+        # Auto-resume: a requeued job (worker restart, SIGTERM) continues from its
+        # latest end-of-epoch checkpoint instead of restarting a multi-day run.
+        ckpt_glob = f"{args.ckpt_dir}/{args.name}/epoch_*.pt"
         job.write_text("#!/bin/bash\nset -euo pipefail\n"
                        'cd "$(cd "$(dirname "$(readlink -f "$0")")/../../.." && pwd)"\n'
-                       f"{cmd} 2>&1 | tee logs/ladder_{args.name}.log\n"
+                       f'CK="$(ls -1 {ckpt_glob} 2>/dev/null | sort | tail -n 1 || true)"\n'
+                       'RESUME=""; if [ -n "$CK" ]; then RESUME="--checkpoint $CK"; echo "RESUMING from $CK"; fi\n'
+                       f"{cmd} $RESUME 2>&1 | tee -a logs/ladder_{args.name}.log\n"
                        "exit ${PIPESTATUS[0]}\n")
         print(f"  queued -> {job.relative_to(ROOT)}")
 

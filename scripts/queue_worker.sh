@@ -39,7 +39,14 @@ done
 CURRENT=""; CHILD=""
 on_signal() {
   echo "[$(date)] signal received; releasing $CURRENT"
-  [ -n "$CHILD" ] && kill "$CHILD" 2>/dev/null
+  if [ -n "$CHILD" ]; then
+    # The job runs in its own process group (setsid): kill the whole tree
+    # (bash -> uv -> python -> loader workers), then wait for it to be gone so
+    # the requeued copy never races a still-running trainer.
+    kill -TERM -- "-$CHILD" 2>/dev/null; sleep 10
+    kill -KILL -- "-$CHILD" 2>/dev/null
+    wait "$CHILD" 2>/dev/null
+  fi
   if [ -n "$CURRENT" ] && [ -e "$Q/running/$CURRENT.$TAG.sh" ]; then
     mv "$Q/running/$CURRENT.$TAG.sh" "$Q/pending/$CURRENT.sh"
   fi
@@ -65,7 +72,7 @@ while true; do
   CURRENT="$name"
   log="logs/queue/$name.$TAG.log"
   echo "[$(date)] START $name on $TAG -> $log"
-  bash "$Q/running/$name.$TAG.sh" > "$log" 2>&1 &
+  setsid bash "$Q/running/$name.$TAG.sh" > "$log" 2>&1 &
   CHILD=$!
   wait "$CHILD"; rc=$?
   CHILD=""
