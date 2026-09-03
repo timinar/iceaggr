@@ -11,7 +11,8 @@
 #
 # Usage (on the box):
 #   git pull && git checkout feat/vmf-unclamped-K3 && uv sync
-#   GEOM=/path/to/sensor_geometry_normalized.csv ./scripts/a100_fleet_20260903.sh [enqueue|workers|all]
+#   GEOM=/path/to/sensor_geometry_normalized.csv ./scripts/a100_fleet_20260903.sh [stageB|enqueue|workers|all]
+#   (all = stageB + enqueue + workers; stageB = the 10M follow-ups, which sort first in the queue)
 # Optional env: WORKERS=<n> (loader workers per job), MAIN_THREADS=<n>, GPU_MEM_GB=<n>.
 # Requires src/iceaggr/data/data_config.yaml (gitignored) pointing at the box's data copy.
 # Watch:  tail -f logs/queue_worker_a100_*.log ; ls queue/a100/{pending,running,done,failed}
@@ -52,8 +53,30 @@ micro_bs() {  # $1 = layers
   while [ "$bs" -gt 256 ] && [ $(( L * 14 * bs / 1024 )) -gt "$budget" ]; do bs=$(( bs / 2 )); done
   echo "$bs"
 }
-bs_args() { local bs; bs=$(micro_bs "$1"); echo "--batch-size $bs --grad-accum $(( 4096 / bs ))"; }
+bs_args() {  # $1 = layers, $2 = effective batch (default 4096)
+  local bs eff="${2:-4096}"; bs=$(micro_bs "$1"); [ "$bs" -gt "$eff" ] && bs=$eff
+  echo "--batch-size $bs --grad-accum $(( eff / bs ))"
+}
 for L in 6 12 24 36; do echo "  L$L: $(bs_args $L)"; done
+
+# ---- Stage B follow-ups moved off the H100 (10M events, 5 ep, effective bs 1024, seed 17
+# unless noted): the remaining 10M-ladder questions. Names sort before F* so the workers run
+# these first (each 2–10 A100-hours), then the 130M fleet. Delete a job file from
+# queue/a100/pending/ if that run already finished on the H100 (check wandb tag scaling-ladder).
+stageB() {
+  local C="--max-events 10000000 --val-events 200000 --val-per-epoch 2 --epochs 5 \
+    --lr 3e-4 --warmup-steps 2000 --dropout 0.1 --weight-decay 0.01 --train-eval-events 200000 \
+    --workers $WORKERS --main-threads $MAIN_THREADS --geometry-path $GEOM --tag stageB --enqueue a100"
+  uv run python scripts/scaling_ladder.py --name B07_10M_d256L24lin_mlr005_s17 --d-model 256 --layers 24 --input-mode linear --muon-lr 0.005 --seed 17 $C $(bs_args 24 1024) --note "Stage B: L24 + learned linear input"
+  uv run python scripts/scaling_ladder.py --name B08_10M_d256L12lin_mlr005_s17 --d-model 256 --layers 12 --input-mode linear --muon-lr 0.005 --seed 17 $C $(bs_args 12 1024) --note "Stage B: L12 + linear input"
+  uv run python scripts/scaling_ladder.py --name B09_10M_d256L24_mlr005_s41    --d-model 256 --layers 24 --muon-lr 0.005 --seed 41 $C $(bs_args 24 1024) --note "Stage B: L24 seed replicate"
+  uv run python scripts/scaling_ladder.py --name B09a_10M_hyb_d256L6_s17       --tokenization hybrid --d-model 256 --layers 6  --muon-lr 0.005 --seed 17 $C $(bs_args 6 1024)  --note "Stage B: HYBRID tokens, 5M control"
+  uv run python scripts/scaling_ladder.py --name B09b_10M_hyb_d256L24_s17      --tokenization hybrid --d-model 256 --layers 24 --muon-lr 0.005 --seed 17 $C $(bs_args 24 1024) --note "Stage B: HYBRID tokens, depth 24"
+  uv run python scripts/scaling_ladder.py --name B12_10M_d256L24_mlr0071_s17   --d-model 256 --layers 24 --muon-lr 0.0071 --seed 17 $C $(bs_args 24 1024) --note "Stage B: L24 Muon-LR bracket upper"
+  uv run python scripts/scaling_ladder.py --name B13_10M_d256L24_mlr0035_s17   --d-model 256 --layers 24 --muon-lr 0.0035 --seed 17 $C $(bs_args 24 1024) --note "Stage B: L24 Muon-LR bracket lower"
+  uv run python scripts/scaling_ladder.py --name B14_10M_d256L36_mlr005_s17    --d-model 256 --layers 36 --muon-lr 0.005 --seed 17 $C $(bs_args 36 1024) --note "Stage B: depth 36 (28.6M)"
+  ls queue/a100/pending
+}
 
 COMMON="--max-events 130000000 --val-events 200000 --val-per-epoch 5 --epochs 10 \
   --lr 3e-4 --warmup-steps 2000 --dropout 0.1 --weight-decay 0.01 --train-eval-events 200000 \
@@ -86,8 +109,9 @@ workers() {
 
 case "$MODE" in
   enqueue) enqueue ;;
+  stageB) stageB ;;
   workers) workers ;;
-  all) enqueue; workers ;;
-  *) echo "usage: $0 [enqueue|workers|all]"; exit 1 ;;
+  all) stageB; enqueue; workers ;;
+  *) echo "usage: $0 [enqueue|stageB|workers|all]   (all = stageB + enqueue + workers)"; exit 1 ;;
 esac
 echo "Done. Eight jobs for $NGPU GPUs; anything else you drop into queue/a100/pending/ runs when a worker frees up."
