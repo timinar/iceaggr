@@ -226,3 +226,16 @@ wandb/
 
 # Paper (Overleaf repo inside)
 paper/
+
+# scaling-ladder runtime job queue (scripts/queue_worker.sh)
+queue/
+
+# Codex/Sol delegation trees: keep briefs/plans/audits, not transcripts or generated outputs
+delegation/**/run.log
+delegation/**/*run.log
+delegation/**/out/
+delegation/**/*.npz
+
+# Only the scaling-program delegation tree is versioned; older Codex trees duplicate source / hold local paths
+delegation/*
+!delegation/scaling-sol/

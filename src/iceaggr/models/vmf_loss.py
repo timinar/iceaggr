@@ -165,13 +165,14 @@ class VMFMixtureLoss(nn.Module):
                 mu.float(), raw_kappa.float(), log_weights.float(), target.float()
             )
 
-    def _forward_fp32(
+    def _log_likelihood_fp32(
         self,
         mu: torch.Tensor,
         raw_kappa: torch.Tensor,
         log_weights: torch.Tensor,
         target: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-event mixture log-likelihood (B,) and κ (B, K), fp32 inputs."""
         kappa = _kappa_from_raw(
             raw_kappa, self.kappa_min, self.kappa_max,
             param=self.kappa_param, kappa_temperature=self.kappa_temperature,
@@ -186,11 +187,40 @@ class VMFMixtureLoss(nn.Module):
         )
         log_component = log_pi + log_c3 + kappa * dot  # (B, K)
         log_likelihood = torch.logsumexp(log_component, dim=-1)  # (B,)
+        return log_likelihood, kappa
+
+    def _forward_fp32(
+        self,
+        mu: torch.Tensor,
+        raw_kappa: torch.Tensor,
+        log_weights: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        log_likelihood, kappa = self._log_likelihood_fp32(mu, raw_kappa, log_weights, target)
         nll = -log_likelihood.mean()
         # Always apply (kappa_reg == 0 is a no-op); no Python branch so the
         # compiled graph stays stable when kappa_reg is annealed.
         nll = nll + self.kappa_reg * (kappa**2).mean()
         return nll
+
+    @torch.no_grad()
+    def per_event_nll(
+        self,
+        mu: torch.Tensor,
+        raw_kappa: torch.Tensor,
+        log_weights: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        """Pure per-event NLL (B,): no κ regularizer, no batch averaging.
+
+        Evaluation-only proper score for the scaling ladder (the training loss
+        adds the κ² penalty and, optionally, the angular term).
+        """
+        with torch.amp.autocast("cuda", enabled=False):
+            ll, _ = self._log_likelihood_fp32(
+                mu.float(), raw_kappa.float(), log_weights.float(), target.float()
+            )
+        return -ll
 
 
 # ---------------------------------------------------------------------------

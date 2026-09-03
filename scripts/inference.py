@@ -26,7 +26,13 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from iceaggr.data import IceCubeDataset, GeometryLoader, make_collate_flat
+from iceaggr.data import (
+    IceCubeDataset,
+    GeometryLoader,
+    make_collate_flat,
+    make_collate_hybrid,
+    make_collate_npe15,
+)
 from iceaggr.models import FlatTransformerV2
 from iceaggr.utils import get_logger
 
@@ -76,15 +82,25 @@ def run_inference(args):
     logger.info(f"Loading geometry from {args.geometry}")
     geometry = GeometryLoader(args.geometry)
 
-    # Override model config if needed
+    # Load the checkpoint; the architecture comes from its saved config (every
+    # run since the proper-split era carries one): the COMPLETE model section —
+    # shape, input mode/dim, head type + vMF settings, ablation/RoPE/spacetime
+    # flags — with dropout forced off. MODEL_CONFIG is only the fallback for
+    # config-less legacy checkpoints. --max-doms still wins.
+    logger.info(f"Loading model from {args.checkpoint}")
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    _cfg = ckpt.get("config") if isinstance(ckpt.get("config"), dict) else {}
+    _m = _cfg.get("model", {})
     config = dict(MODEL_CONFIG)
+    config.update({k: v for k, v in _m.items() if k != "version"})
+    config["dropout"] = 0.0
     if args.max_doms is not None:
         config["max_doms"] = args.max_doms
-
-    # Load model
-    logger.info(f"Loading model from {args.checkpoint}")
+    logger.info(f"Model config from checkpoint: {config}")
+    _order_time = bool(ckpt.get("config", {}).get("data", {}).get("order_doms_by_time",
+                       _m.get("order_doms_by_time", False))) if isinstance(ckpt.get("config"), dict) else False
     model = FlatTransformerV2(config)
-    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+
     # Checkpoint format: {"model": state_dict, "epoch": ..., "val_loss": ..., ...}
     if isinstance(ckpt, dict) and "model" in ckpt:
         state_dict = ckpt["model"]
@@ -95,6 +111,9 @@ def run_inference(args):
     # Strip torch.compile prefix "_orig_mod." if present
     if any(k.startswith("_orig_mod.") for k in state_dict):
         state_dict = {k.removeprefix("_orig_mod."): v for k, v in state_dict.items()}
+    # Legacy vMF checkpoints predate the registered kappa_reg buffer
+    if config.get("head_type") == "vmf" and "vmf_loss.kappa_reg" not in state_dict:
+        state_dict["vmf_loss.kappa_reg"] = torch.tensor(float(config.get("vmf_kappa_reg", 1e-4)))
     model.load_state_dict(state_dict)
     model.eval()
     model.to(device)
@@ -113,11 +132,34 @@ def run_inference(args):
     )
     logger.info(f"Events: {len(dataset):,}")
 
-    collate_fn = make_collate_flat(
-        geometry,
-        max_pulses_per_dom=config["max_pulses_per_dom"],
-        max_doms=config["max_doms"],
-    )
+    # Tokenization follows the checkpoint's data config (flat / npe15 / hybrid);
+    # a hybrid or npe15 model fed flat tokens would run but predict garbage.
+    _d = _cfg.get("data", {})
+    tokenization = _d.get("tokenization", "flat")
+    if tokenization == "npe15":
+        collate_fn = make_collate_npe15(
+            geometry,
+            max_doms=config["max_doms"],
+            normalize_positions=_d.get("npe_normalize_positions", False),
+            correct_percentiles=_d.get("npe_correct_percentiles", False),
+        )
+    elif tokenization == "hybrid":
+        collate_fn = make_collate_hybrid(
+            geometry,
+            max_doms=config["max_doms"],
+            mode=_d.get("hybrid_mode", "full"),
+            include_event_context=_d.get("hybrid_include_event_context", True),
+            normalize_positions=_d.get("npe_normalize_positions", False),
+            correct_percentiles=_d.get("npe_correct_percentiles", False),
+        )
+    else:
+        collate_fn = make_collate_flat(
+            geometry,
+            max_pulses_per_dom=config["max_pulses_per_dom"],
+            max_doms=config["max_doms"],
+            order_doms_by_time=_order_time,
+        )
+    logger.info(f"Tokenization: {tokenization}")
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -143,7 +185,10 @@ def run_inference(args):
             targets = batch["targets"].numpy()  # (B, 2) [azimuth_true, zenith_true]
 
             with torch.amp.autocast("cuda", enabled=(device == "cuda")):
-                pred_vectors = model(dom_vectors, padding_mask)  # (B, 3)
+                out = model(dom_vectors, padding_mask)
+            # FlatTransformerV2 now returns a dict; the point estimate is the
+            # (kappa-weighted, for vMF) unit direction under the 'direction' key.
+            pred_vectors = out["direction"] if isinstance(out, dict) else out  # (B, 3)
 
             azimuth_pred, zenith_pred = unit_vector_to_angles(pred_vectors.float().cpu())
 

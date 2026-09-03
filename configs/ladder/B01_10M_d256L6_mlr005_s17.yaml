@@ -1,0 +1,64 @@
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0
+  vmf_kappa_reg: 0.0001
+  vmf_kappa_reg_final: 0.0
+  vmf_kappa_reg_anneal_fraction: 0.3
+  vmf_angular_weight: 0.5
+training:
+  optimizer: muon
+  muon_lr: 0.005
+  muon_momentum: 0.95
+  epochs: 5
+  batch_size: 1024
+  lr: 0.0003
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16
+  seed: 17
+data:
+  fast_collate: true
+  max_events: 10000000
+  val_events: 200000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches:
+  - 1
+  - 650
+  val_batches:
+  - 651
+  - 655
+  val_per_epoch: 2
+  train_eval_events: 200000
+wandb:
+  enabled: true
+  project: iceaggr
+  name: B01_10M_d256L6_mlr005_s17
+  tags:
+  - scaling-ladder
+  - events-10000000
+  - d256-L6
+  - params-5.0M
+  - muon-lr-0.005
+  - stageB
+checkpoint:
+  dir: checkpoints/ladder
+  save_every: 100
+  resume: null
+_ladder:
+  n_params: 4997403
+  note: 'Stage B control: 5M, 10M events x 5 ep, bs1024'

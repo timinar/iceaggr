@@ -1,0 +1,64 @@
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 512
+  max_doms: 128
+  num_heads: 16
+  num_layers: 6
+  hidden_dim: 2048
+  head_hidden_dim: 1024
+  dropout: 0.0
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0
+  vmf_kappa_reg: 0.0
+  vmf_kappa_reg_final: 0.0
+  vmf_kappa_reg_anneal_fraction: 0.3
+  vmf_angular_weight: 0.5
+training:
+  optimizer: muon
+  muon_lr: 0.005
+  muon_momentum: 0.95
+  epochs: 20
+  batch_size: 1024
+  lr: 0.0003
+  warmup_steps: 1000
+  weight_decay: 0.0
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16
+  seed: 17
+data:
+  fast_collate: true
+  max_events: 1000000
+  val_events: 200000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches:
+  - 1
+  - 650
+  val_batches:
+  - 651
+  - 655
+  val_per_epoch: 1
+  train_eval_events: 200000
+wandb:
+  enabled: true
+  project: iceaggr
+  name: P04_1M_d512L6_mlr005_s17
+  tags:
+  - scaling-ladder
+  - events-1000000
+  - d512-L6
+  - params-19.4M
+  - muon-lr-0.005
+  - fit-probe
+checkpoint:
+  dir: checkpoints/ladder
+  save_every: 1
+  resume: null
+_ladder:
+  n_params: 19415579
+  note: 'width control: 19M wide (zero-pad 256->512), same probe protocol'

@@ -628,6 +628,11 @@ def make_collate_flat(
         if 'target' in batch[0]:
             result['targets'] = torch.stack([b['target'] for b in batch])
 
+        # True (uncapped) pulse count per event, for pulse-count-sliced validation
+        # metrics (scaling ladder). Extra key only; dom_vectors/mask unchanged.
+        if 'n_pulses' in batch[0]:
+            result['n_pulses'] = torch.stack([b['n_pulses'] for b in batch])
+
         return result
 
     return collate_fn

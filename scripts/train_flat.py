@@ -23,6 +23,7 @@ EXPECTED RESULTS
 """
 
 import argparse
+import math
 import time
 from datetime import datetime
 from pathlib import Path
@@ -72,8 +73,44 @@ def parse_args():
     parser.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     parser.add_argument("--name", type=str, default=None, help="Run name for wandb")
     parser.add_argument("--val-per-epoch", type=int, default=None, help="Override val_per_epoch")
+    parser.add_argument("--grad-accum", type=int, default=None, help="Override gradient accumulation steps")
+    parser.add_argument(
+        "--ablate", type=str, default=None,
+        choices=["none", "vanilla", "rmsnorm", "qknorm", "relu2", "zeroinit", "residscaling", "bias"],
+        help="Per-change architecture ablation: disable one N2-T2 feature, "
+             "'vanilla' (all off) or 'none' (full N2-T2).",
+    )
 
     return parser.parse_args()
+
+
+# Map an --ablate name to the model config flag it toggles off.
+_ABLATE_FLAG = {
+    "rmsnorm": "use_rmsnorm",
+    "qknorm": "use_qknorm",
+    "relu2": "use_relu2",
+    "zeroinit": "use_zero_init",
+    "residscaling": "use_resid_scaling",
+}
+
+
+def apply_ablation(config: dict, ablate: str) -> dict:
+    """Translate --ablate into model-config flags (per-change ablation)."""
+    if ablate in (None, "none"):
+        return config
+    m = config.setdefault('model', {})
+    if ablate == "vanilla":
+        m['use_rmsnorm'] = False
+        m['use_qknorm'] = False
+        m['use_relu2'] = False
+        m['use_zero_init'] = False
+        m['use_resid_scaling'] = False
+        m['use_bias'] = True
+    elif ablate == "bias":
+        m['use_bias'] = True  # disable the no-bias feature (add biases back)
+    else:
+        m[_ABLATE_FLAG[ablate]] = False
+    return config
 
 
 def apply_cli_overrides(config: dict, args) -> dict:
@@ -125,6 +162,19 @@ def create_model(config: dict, device: str) -> nn.Module:
             'vmf_kappa_reg',
             # opt-in combined loss: NLL + vmf_angular_weight · angular-distance
             'vmf_angular_weight',
+            # per-change architecture ablation flags (default to N2-T2 behavior)
+            'use_rmsnorm',
+            'use_qknorm',
+            'use_relu2',
+            'use_zero_init',
+            'use_resid_scaling',
+            'use_bias',
+            # relative spacetime-interval attention bias (opt-in; default off)
+            'use_spacetime_bias',
+            'spacetime_bias_hidden_dim',
+            # rotary position embedding (opt-in; default off)
+            'use_rope',
+            'rope_theta',
         ):
             if key in config['model']:
                 model_config[key] = config['model'][key]
@@ -202,7 +252,10 @@ def create_dataloader(
         min_pulses=config['data'].get('min_pulses'),
     )
 
-    sampler = BatchAwareSampler(dataset.metadata)
+    # training.seed (optional) also drives the shuffle order; unset/null keeps
+    # every historical run's order byte-identical (sampler seed 42).
+    _seed = config['training'].get('seed')
+    sampler = BatchAwareSampler(dataset.metadata, seed=42 if _seed is None else int(_seed))
     # Tokenization switch: the default flat pulse-concat tokens, or the 15-dim
     # NPE summary-statistics tokens for the encoding comparison. Default keeps the
     # flat path byte-identical.
@@ -263,6 +316,35 @@ def create_dataloader(
 def _unwrap(model: nn.Module) -> nn.Module:
     """Return the underlying module through torch.compile's OptimizedModule."""
     return getattr(model, '_orig_mod', model)
+
+
+def _rng_state() -> dict:
+    """Snapshot every RNG a resume needs to continue dropout/shuffle streams."""
+    import random
+    import numpy as np
+    state = {
+        'python': random.getstate(),
+        'numpy': np.random.get_state(),
+        'torch': torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state['cuda'] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng_state(state: dict) -> None:
+    import random
+    import numpy as np
+    random.setstate(state['python'])
+    np.random.set_state(state['numpy'])
+    torch.set_rng_state(state['torch'])
+    if 'cuda' in state and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(state['cuda'])
+
+
+def _ckpt_extra(scaler) -> dict:
+    """RNG + GradScaler state stored in every checkpoint (restored on resume)."""
+    return {'rng': _rng_state(), 'scaler': scaler.state_dict()}
 
 
 def _amp_dtype(config: dict) -> torch.dtype:
@@ -371,6 +453,7 @@ def train_epoch(
     best_loss: float = float('inf'),
     checkpoint_dir: Path = None,
     start_batch: int = 0,
+    grad_accum: int = 1,
 ) -> tuple:
     """Train for one epoch with optional mid-epoch validation.
 
@@ -386,14 +469,15 @@ def train_epoch(
     head_type = config['model'].get('head_type', 'directional')
     total_steps = n_batches * config['training']['epochs']
     current_kappa_reg = None  # set each step when head_type == 'vmf'
+    window_gn_sum, window_clipped, window_steps = 0.0, 0, 0  # grad-norm window stats
+
+    optimizer.zero_grad(set_to_none=True)
 
     for batch_idx, batch in enumerate(loader):
         actual_batch = start_batch + batch_idx
         dom_vectors = batch['dom_vectors'].to(device)
         padding_mask = batch['padding_mask'].to(device)
         targets = batch['targets'].to(device)
-
-        optimizer.zero_grad()
 
         # vMF: apply kappa_reg schedule (in-place on buffer so torch.compile
         # sees the update without recompiling).
@@ -413,15 +497,27 @@ def train_epoch(
                 y_pred = outputs['direction'] if isinstance(outputs, dict) else outputs
                 loss = angular_distance_loss(y_pred, targets)
 
-        # Backward with gradient scaling
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=config['training']['gradient_clip'])
-        scaler.step(optimizer)
-        scaler.update()
+        # Backward with gradient scaling (divide for accumulation; accum=1 is a no-op)
+        scaler.scale(loss / grad_accum).backward()
 
-        # Step LR scheduler (OneCycleLR needs per-step updates)
-        scheduler.step()
+        # Optimizer step every grad_accum micro-batches (and at epoch end). The
+        # epoch-end flush is keyed on actual_batch: after a mid-epoch resume the
+        # loader yields fewer batches than len(loader) reports.
+        if (batch_idx + 1) % grad_accum == 0 or (actual_batch + 1) == n_batches:
+            scaler.unscale_(optimizer)
+            clip = float(config['training']['gradient_clip'])
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip)
+            # Pre-clip norm + clip rate since the last log line (scaling-ladder
+            # diagnostic: a >10% clip rate means LR/clip need tuning, not the model).
+            gn = float(grad_norm)
+            if math.isfinite(gn):
+                window_gn_sum += gn
+                window_clipped += int(gn > clip)
+                window_steps += 1
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()  # OneCycleLR steps per optimizer step
+            optimizer.zero_grad(set_to_none=True)
 
         total_loss += loss.item()
         n_trained += 1
@@ -434,6 +530,10 @@ def train_epoch(
                 "train/loss": loss.item(),
                 "train/lr": current_lr,
             }
+            if window_steps > 0:
+                log_payload["train/grad_norm"] = window_gn_sum / window_steps
+                log_payload["train/clip_frac"] = window_clipped / window_steps
+                window_gn_sum, window_clipped, window_steps = 0.0, 0, 0
             if head_type != 'vmf':
                 log_payload["train/loss_deg"] = torch.rad2deg(torch.tensor(loss.item())).item()
             else:
@@ -463,6 +563,7 @@ def train_epoch(
             logger.info(
                 f"Epoch {epoch:3d} | Mid-epoch val @ batch {actual_batch+1}/{n_batches} | "
                 f"Val loss: {val_loss:.4f} | Angular err: {val_ang_deg:.2f} deg"
+                + _val_extra_str(val_metrics)
             )
 
             # Log to wandb
@@ -472,6 +573,7 @@ def train_epoch(
                     "val/loss": val_loss,
                     "val/angular_error_rad": val_ang_err,
                     "val/angular_error_deg": val_ang_deg,
+                    **_val_extra_payload(val_metrics),
                 }, step=step)
 
             # Save best model checkpoint (by training-objective loss)
@@ -489,6 +591,7 @@ def train_epoch(
                     'val_angular_error_rad': val_ang_err,
                     'best_loss': best_loss,
                     'config': config,
+                    **_ckpt_extra(scaler),
                 }, checkpoint_path)
                 logger.info(f"Saved best model (val angular err: {val_ang_deg:.2f} deg)")
 
@@ -498,12 +601,23 @@ def train_epoch(
     return total_loss / n_trained if n_trained > 0 else 0.0, best_loss
 
 
+# Pulse-count thresholds for the sliced validation metrics (val/angular_error_deg_geN).
+VAL_SLICES = (200, 1000)
+
+
 def validate(model: nn.Module, loader: DataLoader, device: str, config: dict) -> dict:
     """Validate on the full validation set.
 
-    Returns:
-        {'loss': training-objective loss, 'angular_error_rad': mean angular error}
-        For the directional head these are identical; for vMF they differ.
+    Returns a dict with at least
+        'loss'              training-objective loss (batch-mean, as logged historically)
+        'angular_error_rad' mean per-event angular error
+    plus, for the scaling ladder,
+        'angular_error_median_rad'
+        'nll'               vMF only: loss minus the λ·angular term (≈ pure NLL)
+        'angular_error_rad_ge<N>' / 'n_ge<N>'  for N in VAL_SLICES, when the collator
+                            supplies 'n_pulses' (flat collator does; others skip).
+    For the directional head 'loss' and 'angular_error_rad' coincide up to the
+    batch-mean vs event-mean weighting of the last partial batch.
     """
     model.eval()
 
@@ -511,6 +625,8 @@ def validate(model: nn.Module, loader: DataLoader, device: str, config: dict) ->
     total_ang_err = 0.0
     n_batches = 0
     head_type = config['model'].get('head_type', 'directional')
+    errs, nlls, n_pulses = [], [], []
+    vmf_loss_mod = _unwrap(model).vmf_loss if head_type == 'vmf' else None
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
@@ -523,23 +639,92 @@ def validate(model: nn.Module, loader: DataLoader, device: str, config: dict) ->
                     target_unit = angles_to_unit_vector(targets[:, 0], targets[:, 1])
                     outputs = model(dom_vectors, padding_mask, target=target_unit)
                     loss = outputs['loss']
-                    ang_err = angular_distance_loss(outputs['direction'], targets)
+                    y_pred = outputs['direction']
+                    ang_err = angular_distance_loss(y_pred, targets)
                 else:
                     outputs = model(dom_vectors, padding_mask)
                     y_pred = outputs['direction'] if isinstance(outputs, dict) else outputs
                     loss = angular_distance_loss(y_pred, targets)
                     ang_err = loss
+            # Historical metric: batch-mean of the per-batch mean angular error,
+            # computed under autocast exactly as every run before 2026-09 did, so
+            # val/angular_error_rad stays comparable across the whole project.
+            total_ang_err += ang_err.item()
+
+            # Per-event angular error in fp32 (same epsilon as angular_distance_loss)
+            y_true = angles_to_unit_vector(targets[:, 0], targets[:, 1]).float()
+            dot = (torch.nn.functional.normalize(y_pred.float(), dim=-1) * y_true).sum(dim=-1)
+            errs.append(torch.arccos(dot.clamp(-1 + 1e-4, 1 - 1e-4)).abs().cpu())
+            if vmf_loss_mod is not None:
+                # pure per-event mixture NLL: no κ penalty, no angular term
+                nlls.append(vmf_loss_mod.per_event_nll(
+                    outputs['mu'], outputs['raw_kappa'], outputs['log_weights'], y_true).cpu())
+            if 'n_pulses' in batch:
+                n_pulses.append(batch['n_pulses'].cpu())
 
             total_loss += loss.item()
-            total_ang_err += ang_err.item()
             n_batches += 1
 
     if n_batches == 0:
         return {'loss': 0.0, 'angular_error_rad': 0.0}
-    return {
+    errs = torch.cat(errs)
+    out = {
         'loss': total_loss / n_batches,
-        'angular_error_rad': total_ang_err / n_batches,
+        'angular_error_rad': total_ang_err / n_batches,      # historical (batch-mean)
+        'angular_error_event_rad': errs.mean().item(),       # event-weighted, fp32
+        'angular_error_median_rad': errs.median().item(),
     }
+    nlls = torch.cat(nlls) if nlls else None
+    if nlls is not None:
+        out['nll'] = nlls.mean().item()
+    if n_pulses:
+        n_pulses = torch.cat(n_pulses)
+        for th in VAL_SLICES:
+            m = n_pulses >= th
+            if bool(m.any()):
+                out[f'angular_error_rad_ge{th}'] = errs[m].mean().item()
+                out[f'angular_error_median_rad_ge{th}'] = errs[m].median().item()
+                out[f'n_ge{th}'] = int(m.sum())
+                if nlls is not None:
+                    out[f'nll_ge{th}'] = nlls[m].mean().item()
+    return out
+
+
+def _val_extra_payload(val_metrics: dict) -> dict:
+    """wandb payload for the extra validate() keys (median, nll, pulse slices)."""
+    payload = {}
+    if 'angular_error_event_rad' in val_metrics:
+        payload['val/angular_error_event_deg'] = math.degrees(val_metrics['angular_error_event_rad'])
+    if 'angular_error_median_rad' in val_metrics:
+        payload['val/angular_error_median_deg'] = math.degrees(val_metrics['angular_error_median_rad'])
+    if 'nll' in val_metrics:
+        payload['val/nll'] = val_metrics['nll']
+    for th in VAL_SLICES:
+        k = f'angular_error_rad_ge{th}'
+        if k in val_metrics:
+            payload[f'val/angular_error_deg_ge{th}'] = math.degrees(val_metrics[k])
+            payload[f'val/angular_error_median_deg_ge{th}'] = math.degrees(
+                val_metrics[f'angular_error_median_rad_ge{th}'])
+            payload[f'val/n_ge{th}'] = val_metrics[f'n_ge{th}']
+            if f'nll_ge{th}' in val_metrics:
+                payload[f'val/nll_ge{th}'] = val_metrics[f'nll_ge{th}']
+    return payload
+
+
+def _val_extra_str(val_metrics: dict) -> str:
+    """Compact log-line suffix for the extra validate() keys."""
+    parts = []
+    if 'angular_error_median_rad' in val_metrics:
+        parts.append(f"med {math.degrees(val_metrics['angular_error_median_rad']):.2f}")
+    if 'nll' in val_metrics:
+        parts.append(f"nll {val_metrics['nll']:.4f}")
+    for th in VAL_SLICES:
+        k = f'angular_error_rad_ge{th}'
+        if k in val_metrics:
+            parts.append(f">={th}: {math.degrees(val_metrics[k]):.2f}/"
+                         f"{math.degrees(val_metrics[f'angular_error_median_rad_ge{th}']):.2f}"
+                         f" (n={val_metrics[f'n_ge{th}']})")
+    return (" | " + " | ".join(parts)) if parts else ""
 
 
 def main():
@@ -548,9 +733,32 @@ def main():
     # Load and merge config
     config = load_config(args.config)
     config = apply_cli_overrides(config, args)
+    config = apply_ablation(config, args.ablate)
+    if args.grad_accum is not None:
+        config['training']['grad_accum_steps'] = args.grad_accum
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Using device: {device}")
+
+    # Optional cap on the MAIN process's intra-op threads (training.main_threads).
+    # By default torch keeps a pool of ~half the cores that spin-waits while the
+    # GPU runs; with several trainers per box (A100 fleet) those pools starve the
+    # dataloader workers. 4–8 is plenty for the main process. Unset → unchanged.
+    main_threads = config['training'].get('main_threads')
+    if main_threads:
+        torch.set_num_threads(int(main_threads))
+        logger.info(f"Main-process torch threads capped at {int(main_threads)}")
+
+    # Optional seed (training.seed): init + dropout + shuffle order. Unset →
+    # historical behaviour (unseeded init, sampler seed 42).
+    seed = config['training'].get('seed')
+    if seed is not None:
+        import random
+        import numpy as np
+        random.seed(int(seed))
+        np.random.seed(int(seed))
+        torch.manual_seed(int(seed))  # also seeds CUDA
+        logger.info(f"Seeded python/numpy/torch with training.seed={seed}")
 
     # Initialize wandb
     wandb_run = None
@@ -609,9 +817,27 @@ def main():
         )
         logger.info(f"Validation: {len(val_loader.dataset):,} events, {len(val_loader):,} batches")
 
-    # LR schedule geometry - OneCycleLR with warmup
-    total_steps = len(loader) * config['training']['epochs']
+    # Optional fixed train-eval set (scaling ladder): the first
+    # data.train_eval_events events of data.train_eval_batches (default: the first
+    # training batch), scored in eval mode after every epoch so the generalization
+    # gap (val − train-eval) is measured on identical events, dropout off.
+    train_eval_loader = None
+    n_train_eval = config['data'].get('train_eval_events')
+    if n_train_eval and train_batch_range is not None:
+        te_range = tuple(config['data'].get('train_eval_batches', (train_batch_range[0], train_batch_range[0])))
+        train_eval_loader, _ = create_dataloader(
+            config, geometry, batch_range=te_range, max_events=int(n_train_eval), num_workers=2,
+        )
+        logger.info(f"Train-eval: {len(train_eval_loader.dataset):,} events from batches {te_range}")
+
+    # LR schedule geometry - OneCycleLR with warmup (count OPTIMIZER steps, not micro-batches)
+    grad_accum = max(1, int(config['training'].get('grad_accum_steps', 1)))
+    steps_per_epoch = math.ceil(len(loader) / grad_accum)
+    total_steps = steps_per_epoch * config['training']['epochs']
     warmup_steps = config['training'].get('warmup_steps', 1000)
+    if grad_accum > 1:
+        logger.info(f"Gradient accumulation: {grad_accum} micro-batches/step "
+                    f"(effective batch size {config['training']['batch_size'] * grad_accum})")
     pct_start = min(warmup_steps / total_steps, 0.3)  # Cap at 30% of training
 
     # Optimizer + scheduler (AdamW default; Muon opt-in via training.optimizer)
@@ -630,7 +856,9 @@ def main():
     resume_batch = 0
     resume_path = config['checkpoint'].get('resume')
     if resume_path and Path(resume_path).exists():
-        checkpoint = torch.load(resume_path)
+        # Our own checkpoints: they carry RNG state (numpy arrays, python tuples)
+        # that torch>=2.6's weights_only default refuses to unpickle.
+        checkpoint = torch.load(resume_path, map_location='cpu', weights_only=False)
         state = checkpoint['model']
         # Back-compat: legacy vMF checkpoints saved before kappa_reg became a
         # registered buffer don't carry it. Inject from current config so the
@@ -653,6 +881,13 @@ def main():
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])
             best_loss = checkpoint.get('best_loss', checkpoint.get('val_loss', float('inf')))
+            # Continue the RNG streams and loss-scaler state (checkpoints written
+            # before these keys existed resume as they always did).
+            if 'scaler' in checkpoint:
+                scaler.load_state_dict(checkpoint['scaler'])
+            if 'rng' in checkpoint:
+                _restore_rng_state(checkpoint['rng'])
+                logger.info("Restored RNG + GradScaler state from checkpoint")
 
             resume_batch_idx = checkpoint.get('batch_idx')
             if resume_batch_idx is not None:
@@ -670,6 +905,10 @@ def main():
     val_interval = None
     if val_loader is not None and val_per_epoch > 1:
         val_interval = max(1, len(loader) // val_per_epoch)
+        # Mid-epoch checkpoints must land right after an optimizer step, so the
+        # validation cadence is a multiple of the accumulation window.
+        if grad_accum > 1:
+            val_interval = max(grad_accum, (val_interval // grad_accum) * grad_accum)
         logger.info(f"Mid-epoch validation: {val_per_epoch} times/epoch (every {val_interval} batches)")
 
     checkpoint_dir = Path(config['checkpoint']['dir'])
@@ -700,6 +939,7 @@ def main():
             best_loss=best_loss,
             checkpoint_dir=run_checkpoint_dir,
             start_batch=skip_batches,
+            grad_accum=grad_accum,
         )
 
         # End-of-epoch validation
@@ -719,7 +959,27 @@ def main():
             f"Train: {train_loss:.4f} | "
             f"Val loss: {val_loss:.4f} | Angular err: {val_ang_deg:.2f} deg | "
             f"LR: {current_lr:.2e}"
+            + _val_extra_str(val_metrics)
         )
+
+        # Eval-mode score on the fixed train-eval events (generalization gap)
+        te_payload = {}
+        if train_eval_loader is not None:
+            te = validate(model, train_eval_loader, device, config)
+            te_deg = math.degrees(te['angular_error_rad'])
+            te_payload = {
+                "train_eval/loss": te['loss'],
+                "train_eval/angular_error_deg": te_deg,
+                "train_eval/gap_loss": val_loss - te['loss'],
+                "train_eval/gap_deg": val_ang_deg - te_deg,
+                **{k.replace("val/", "train_eval/"): v for k, v in _val_extra_payload(te).items()},
+            }
+            if 'nll' in te and 'nll' in val_metrics:
+                te_payload["train_eval/gap_nll"] = val_metrics['nll'] - te['nll']
+            logger.info(
+                f"Epoch {epoch:3d} train-eval | loss {te['loss']:.4f} | Angular err: {te_deg:.2f} deg"
+                + _val_extra_str(te) + f" | gap(val-train) {val_loss - te['loss']:+.4f}"
+            )
 
         # Log to wandb
         if wandb_run is not None:
@@ -731,6 +991,8 @@ def main():
                 "val/angular_error_rad": val_ang_err,
                 "val/angular_error_deg": val_ang_deg,
                 "lr": current_lr,
+                **_val_extra_payload(val_metrics),
+                **te_payload,
             })
 
         # Save checkpoint if best
@@ -748,6 +1010,7 @@ def main():
                 'val_angular_error_rad': val_ang_err,
                 'best_loss': best_loss,
                 'config': config,
+                **_ckpt_extra(scaler),
             }, checkpoint_path)
             logger.info(f"Saved best model (val angular err: {val_ang_deg:.2f} deg)")
 
@@ -766,6 +1029,7 @@ def main():
                 'val_angular_error_rad': val_ang_err,
                 'best_loss': best_loss,
                 'config': config,
+                **_ckpt_extra(scaler),
             }, latest_path)
 
     head_type = config['model'].get('head_type', 'directional')

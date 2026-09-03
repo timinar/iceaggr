@@ -376,6 +376,9 @@ def make_collate_npe15(
         }
         if "target" in batch[0]:
             result["targets"] = torch.stack([b["target"] for b in batch])
+        # True pulse count per event (pulse-count-sliced validation metrics); extra key only.
+        if "n_pulses" in batch[0]:
+            result["n_pulses"] = torch.stack([b["n_pulses"] for b in batch])
         return result
 
     return collate_fn
