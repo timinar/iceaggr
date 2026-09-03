@@ -1,0 +1,70 @@
+# Small-scale RoPE test on a MEANINGFUL token order: identical to
+# ablation_base_rope.yaml (full N2-T2 small model, MAE head, RoPE ON) but the
+# collator now orders DOM tokens within each event by earliest-hit (Cherenkov)
+# time, so RoPE's sequence-position index = hit rank instead of arbitrary
+# sensor_id order. This is the fair RoPE test.
+# Apples-to-apples baseline = abl-full (configs/ablation_base.yaml, no rope,
+# sensor_id order) = 58.54° val.
+#
+#   sbatch -A pheno -p gr10_gpu --gres=gpu:1 -c 4 --mem=24G -t 06:00:00 \
+#     -J abl-rope-timeorder -o logs/rope_small_%j.log --wrap \
+#     "cd /lustre/hpc/pheno/inar/iceaggr && uv run python scripts/train_flat.py \
+#      --config configs/ablation_base_rope_timeorder.yaml --name abl-rope-timeorder --no-wandb --workers 4"
+
+model:
+  version: v2
+  input_mode: linear
+  max_pulses_per_dom: 16
+  d_model: 128
+  max_doms: 128
+  num_heads: 8
+  num_layers: 4
+  hidden_dim: 256
+  head_hidden_dim: 128
+  dropout: 0.1
+  # full N2-T2 architecture (same as ablation_base) ...
+  use_rmsnorm: true
+  use_qknorm: true
+  use_relu2: true
+  use_zero_init: true
+  use_resid_scaling: true
+  use_bias: false
+  # ... plus rotary position embedding (the variable under test). RoPE adds zero
+  # learnable parameters; tokens are indexed by sequence position (CLS at 0).
+  use_rope: true
+  rope_theta: 10000.0
+  # order DOM tokens by earliest-hit time so RoPE's position index = hit rank
+  # (vs. arbitrary sensor_id order). This is what makes the RoPE test meaningful.
+  order_doms_by_time: true
+
+training:
+  epochs: 10
+  batch_size: 256
+  lr: 1e-4
+  warmup_steps: 1000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  grad_accum_steps: 1
+
+data:
+  max_events: 10000000
+  val_events: 100000
+  num_workers: 4
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: null
+  tags:
+    - rope
+    - timeorder
+    - small-scale
+
+checkpoint:
+  dir: checkpoints
+  save_every: 5
+  resume: null

@@ -1,0 +1,61 @@
+# v2 none K=84 ~5M params + RoPE on hit-time-ordered DOM tokens
+#
+# Production-scale confirmation of the small-scale RoPE result (hit-time order
+# gave ~0.2 deg at d=128/L=4, A4500). Apples-to-apples baseline = the headline
+# v2-none-K84-5M-proper-split-10ep run (val 55.5 deg / 0.9681 rad): the no-RoPE
+# path is byte-identical and the backbone is permutation-invariant over DOM
+# order, so that run is a valid no-positional-encoding reference.
+#
+# Maxes out pulse capacity: input_dim = 4 + 3*84 = 256 = d_model. head_dim =
+# 256/8 = 32 (even -> RoPE OK).
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+  # --- the variable under test ---
+  use_rope: true
+  rope_theta: 10000.0
+  order_doms_by_time: true
+
+training:
+  epochs: 10
+  batch_size: 4096
+  lr: 3e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  max_events: 200000000
+  val_events: 50000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-none-K84-5M-rope-timeorder
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - input-none
+    - rope
+    - hit-time-order
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: null

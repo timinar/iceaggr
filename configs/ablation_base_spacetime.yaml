@@ -1,0 +1,63 @@
+# Small-scale spacetime-bias test: identical to ablation_base.yaml (the full N2-T2
+# small model, MAE head) but with the relative spacetime-interval attention bias ON.
+# Apples-to-apples baseline = abl-full (ablation_base.yaml, bias off) = 58.54° val.
+# A clean fast signal (10M events, ~2-3h on an A4500) for whether the spacetime
+# bias helps at small scale before committing a full 5M/130M run.
+#
+#   sbatch -A pheno -p gr10_gpu --gres=gpu:1 -c 4 --mem=24G -t 06:00:00 \
+#     -J st-small -o logs/spacetime_small_%j.log --wrap \
+#     "cd /lustre/hpc/pheno/inar/iceaggr && uv run python scripts/train_flat.py \
+#      --config configs/ablation_base_spacetime.yaml --name abl-spacetime --no-wandb --workers 4"
+
+model:
+  version: v2
+  input_mode: linear
+  max_pulses_per_dom: 16
+  d_model: 128
+  max_doms: 128
+  num_heads: 8
+  num_layers: 4
+  hidden_dim: 256
+  head_hidden_dim: 128
+  dropout: 0.1
+  # full N2-T2 architecture (same as ablation_base) ...
+  use_rmsnorm: true
+  use_qknorm: true
+  use_relu2: true
+  use_zero_init: true
+  use_resid_scaling: true
+  use_bias: false
+  # ... plus the relative spacetime-interval attention bias (the variable under test)
+  use_spacetime_bias: true
+  spacetime_bias_hidden_dim: 32
+
+training:
+  epochs: 10
+  batch_size: 256
+  lr: 1e-4
+  warmup_steps: 1000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  grad_accum_steps: 1
+
+data:
+  max_events: 10000000
+  val_events: 100000
+  num_workers: 4
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: null
+  tags:
+    - spacetime-bias
+    - small-scale
+
+checkpoint:
+  dir: checkpoints
+  save_every: 5
+  resume: null

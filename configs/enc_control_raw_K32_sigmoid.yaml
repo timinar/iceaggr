@@ -1,0 +1,61 @@
+# Encoding-comparison control run (sigmoid kappa) — 2026-07-11 audit follow-up.
+# Purpose: Johann's enc comparison used softplus kappa for the raw leg but sigmoid
+# for humanstats/aelatent (see paper/AUDIT_encoding_comparison.md Q6). These three
+# configs rerun the RAW K=32 leg in OUR pipeline varying ONLY the kappa
+# parameterization, to measure whether the head confound is material (~0.3 deg?).
+# Protocol mirrors his compare_enc_raw.yaml: 10 epochs x 10M events (effectively
+# batches 1-50), val = first 50k events of batch 651, bs 256, lr 1e-4, K=32
+# linear input (input_dim=100), d256/L6/H8/ff1024, vMF M=3, kappa_reg 1e-4 fixed.
+
+model:
+  version: v2
+  input_mode: linear
+  max_pulses_per_dom: 32
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 700.0
+  vmf_kappa_param: sigmoid
+  vmf_kappa_temperature: 1.0
+  vmf_kappa_reg: 1.0e-4
+
+training:
+  epochs: 10
+  batch_size: 256
+  lr: 1e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  max_events: 10000000
+  val_events: 50000
+  num_workers: 6
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: enc-control-raw-K32-sigmoid
+  tags:
+    - encoding-comparison-control
+    - raw-pulse
+    - vmf-K3
+    - K32
+    - kappa-sigmoid
+
+checkpoint:
+  dir: checkpoints/enc-control-raw-K32-sigmoid
+  save_every: 5
+  resume: null

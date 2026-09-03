@@ -1,0 +1,73 @@
+# Fine-tune the NPE-15 human-summary-statistics model on high-activity events
+# (>= 1000 pulses).
+#
+# Clone of configs/train_flat_v2_vmf_K3_5M_unclamped_finetune_hi.yaml with the
+# npe15 tokenization, starting from the npe15 unclamped base checkpoint
+# (v2-npe15-5M-unclamped-10ep) and continuing exclusively on >= 1000-pulse events.
+# kappa_reg held at 0 throughout finetune.
+
+model:
+  version: v2
+  input_mode: linear
+  input_dim: 15
+  max_pulses_per_dom: 84      # unused by the npe15 collator (kept for schema parity)
+  d_model: 256
+  max_doms: 512
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0             # safety net (non-binding); see base config
+  vmf_kappa_reg: 0.0                 # anneal already finished in pretrain
+  vmf_angular_weight: 0.5            # combined loss: NLL + λ·angular-distance
+
+training:
+  optimizer: muon
+  muon_lr: 2.5e-4
+  epochs: 10
+  batch_size: 512
+  lr: 3e-5
+  warmup_steps: 500
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16
+
+data:
+  tokenization: npe15
+  min_pulses: 1000
+  max_events: 200000000
+  val_events: 50000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 635]
+  val_batches: [636, 660]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-npe15-muonft-2p5em4
+  tags:
+    - flat-transformer-v2
+    - npe15
+    - humanstats-encoding
+    - 5M-params
+    - input-linear
+    - vmf
+    - mixture-3
+    - kappa-unclamped
+    - combined-loss
+    - finetune
+    - high-activity
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: checkpoints/v2-npe15-muon-combined-10ep/best.pt
+  finetune: true            # load model weights only, fresh optimizer+scheduler

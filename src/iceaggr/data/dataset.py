@@ -7,8 +7,40 @@ This module provides:
 - get_dataloader: Convenience function for creating dataloaders
 """
 
+import os
+
+# Bound dataloader RSS by selecting Arrow's system (glibc malloc) memory pool.
+#
+# The default pyarrow allocator (mimalloc, in the bundled wheel) caches freed
+# large blocks instead of returning them to the OS. As BatchAwareSampler walks
+# ~50 pulse-batch files per epoch, each DataLoader worker reads a fresh ~0.85 GB
+# Arrow table and frees the previous one; mimalloc keeps those pages mapped, so
+# per-worker RSS ratchets up ~1 GB per distinct file touched even though Arrow's
+# bytes_allocated() stays flat. With num_workers=3 this OOM-killed training on
+# the 62 GB A4500 nodes mid-epoch (process tree grew to ~35 GB and climbing).
+#
+# glibc malloc munmaps these large allocations on free, so RSS plateaus instead.
+# In prototyping this took the process tree from 35 GB (climbing) to a flat
+# ~10.7 GB with byte-identical batches and no throughput regression.
+#
+# pyarrow reads this env var when it FIRST selects its default pool, so we set
+# it before `import pyarrow` below. setdefault() leaves any explicit override
+# from the environment (sbatch / launcher) intact.
+os.environ.setdefault("ARROW_DEFAULT_MEMORY_POOL", "system")
+
 import pyarrow.parquet as pq
 import pyarrow as pa
+
+# The env var above only takes effect if pyarrow hasn't already picked a pool in
+# this process (its selection is import-order-dependent). Some entry points
+# import pyarrow before iceaggr.data, in which case the env var is read too late
+# and the backend stays on the default mimalloc. So we ALSO switch the default
+# pool explicitly at runtime — this is import-order-independent and idempotent.
+# read_table() routes its large table buffers through the default pool, and the
+# system pool munmaps them on free, which is what bounds RSS. On Linux,
+# DataLoader workers are forked and inherit the already-selected system pool.
+if pa.default_memory_pool().backend_name != "system" and "system" in pa.supported_memory_backends():
+    pa.set_memory_pool(pa.system_memory_pool())
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -66,19 +98,58 @@ class IceCubeDataset(Dataset):
         self.data_root = Path(config["data"]["root"])
         self.split = split
 
-        # Load metadata
+        # Load metadata. The monolithic {split}_meta.parquet is ~3.8 GB / 132 M
+        # rows in only 2 row-groups, so reading it (plus the .take() filter copy)
+        # is a ~12 GB memory spike — the main reason these runs OOM on smaller
+        # nodes. When a batch_range is requested and the per-batch metadata
+        # dataset exists ({split}_meta/batch_<b>.parquet, which carries batch_id),
+        # read ONLY the needed batches instead, and stop early once a plain
+        # max_events cap is covered. This drops the metadata footprint to a few
+        # hundred MB for subset runs and removes the monolithic spike entirely.
         meta_path = self.data_root / f"{split}_meta.parquet"
-        logger.info(f"Loading metadata from {meta_path}...")
-        self.metadata = pq.read_table(meta_path)
+        per_batch_dir = self.data_root / f"{split}_meta"
 
-        # Filter by batch_id range if specified
-        if batch_range is not None:
+        loaded_per_batch = False
+        if batch_range is not None and per_batch_dir.is_dir():
             min_batch, max_batch = batch_range
-            batch_ids = self.metadata.column("batch_id").to_numpy()
-            mask = (batch_ids >= min_batch) & (batch_ids <= max_batch)
-            indices = np.where(mask)[0]
-            self.metadata = self.metadata.take(indices)
-            logger.info(f"Filtered to batch_id [{min_batch}, {max_batch}]: {len(self.metadata):,} events")
+            tables = []
+            total = 0
+            for b in range(min_batch, max_batch + 1):
+                p = per_batch_dir / f"batch_{b}.parquet"
+                if not p.exists():
+                    # A partial per-batch store must not silently shrink the
+                    # split (a damaged copy on another machine would otherwise
+                    # train/validate on the wrong events).
+                    raise FileNotFoundError(
+                        f"per-batch metadata {p} missing while batch_range={batch_range}; "
+                        f"restore it or remove {per_batch_dir} to fall back to {meta_path}"
+                    )
+                t = pq.read_table(p)
+                tables.append(t)
+                total += t.num_rows
+                # Early stop: a plain max_events cap (no min_pulses filtering,
+                # which would shrink the count) needs only enough batches to cover it.
+                if max_events is not None and min_pulses is None and total >= max_events:
+                    break
+            if tables:
+                self.metadata = pa.concat_tables(tables)
+                logger.info(
+                    f"Loaded per-batch metadata for batches [{min_batch}, {max_batch}] "
+                    f"({len(tables)} files): {len(self.metadata):,} events"
+                )
+                loaded_per_batch = True
+
+        if not loaded_per_batch:
+            logger.info(f"Loading metadata from {meta_path}...")
+            self.metadata = pq.read_table(meta_path)
+            # Filter by batch_id range if specified
+            if batch_range is not None:
+                min_batch, max_batch = batch_range
+                batch_ids = self.metadata.column("batch_id").to_numpy()
+                mask = (batch_ids >= min_batch) & (batch_ids <= max_batch)
+                indices = np.where(mask)[0]
+                self.metadata = self.metadata.take(indices)
+                logger.info(f"Filtered to batch_id [{min_batch}, {max_batch}]: {len(self.metadata):,} events")
 
         # Apply min_pulses BEFORE max_events so the count cap acts on the filtered set
         if min_pulses is not None:
@@ -105,28 +176,48 @@ class IceCubeDataset(Dataset):
             self.azimuth = self.metadata.column("azimuth").to_numpy()
             self.zenith = self.metadata.column("zenith").to_numpy()
 
-        # Simple LRU cache for batch files
+        # Simple LRU cache for batch files. Each entry is a dict of the four
+        # pulse columns as numpy arrays (in their NATIVE dtypes) rather than the
+        # full Arrow table. Caching numpy buffers — not the Arrow table — lets the
+        # transient table from read_table() be freed immediately, so the cached
+        # footprint per file drops from ~1.9 GB (full Arrow table, all columns) to
+        # ~0.85 GB (4 needed columns). Combined with the system Arrow pool above,
+        # this keeps each DataLoader worker's RSS bounded across an epoch.
         self.cache_size = cache_size
-        self.batch_cache: Dict[int, pa.Table] = {}
+        self.batch_cache: Dict[int, Dict[str, np.ndarray]] = {}
         self.cache_access_order: List[int] = []
 
     def __len__(self) -> int:
         return self.n_events
 
-    def _load_batch(self, batch_id: int) -> pa.Table:
-        """Load a batch file with LRU caching."""
+    def _load_batch(self, batch_id: int) -> Dict[str, np.ndarray]:
+        """Load a batch file's pulse columns (numpy) with LRU caching."""
         if batch_id in self.batch_cache:
             # Move to end of access order (most recently used)
             self.cache_access_order.remove(batch_id)
             self.cache_access_order.append(batch_id)
             return self.batch_cache[batch_id]
 
-        # Load batch file
+        # Load batch file. Read only the columns __getitem__ needs, and convert to
+        # numpy in their native dtypes (time int64, charge float64, sensor_id
+        # int16, auxiliary bool) so the downstream np.stack(...).float() promotion
+        # is byte-identical to the previous Arrow-backed path. Drop the Arrow
+        # table immediately; release_unused() returns its read buffers to the OS.
         batch_path = self.data_root / self.split / f"batch_{batch_id}.parquet"
-        batch_table = pq.read_table(batch_path)
+        table = pq.read_table(
+            batch_path, columns=["time", "charge", "sensor_id", "auxiliary"]
+        )
+        cols = {
+            "time": table.column("time").to_numpy(zero_copy_only=False),
+            "charge": table.column("charge").to_numpy(zero_copy_only=False),
+            "sensor_id": table.column("sensor_id").to_numpy(zero_copy_only=False),
+            "auxiliary": table.column("auxiliary").to_numpy(zero_copy_only=False),
+        }
+        del table
+        pa.default_memory_pool().release_unused()
 
         # Update cache
-        self.batch_cache[batch_id] = batch_table
+        self.batch_cache[batch_id] = cols
         self.cache_access_order.append(batch_id)
 
         # Evict oldest if cache is full
@@ -134,7 +225,7 @@ class IceCubeDataset(Dataset):
             oldest_batch_id = self.cache_access_order.pop(0)
             del self.batch_cache[oldest_batch_id]
 
-        return batch_table
+        return cols
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """Get a single event."""
@@ -145,15 +236,13 @@ class IceCubeDataset(Dataset):
         last_pulse = self.last_pulse_idx[idx]
         n_pulses = last_pulse - first_pulse + 1
 
-        # Load batch and extract event
-        batch_table = self._load_batch(batch_id)
-        event_table = batch_table.slice(first_pulse, n_pulses)
-
-        # Extract features
-        time = event_table.column("time").to_numpy()
-        charge = event_table.column("charge").to_numpy()
-        sensor_id = event_table.column("sensor_id").to_numpy()
-        auxiliary = event_table.column("auxiliary").to_numpy()
+        # Load batch (numpy columns) and slice this event's pulses
+        cols = self._load_batch(batch_id)
+        s = slice(first_pulse, first_pulse + n_pulses)
+        time = cols["time"][s]
+        charge = cols["charge"][s]
+        sensor_id = cols["sensor_id"][s]
+        auxiliary = cols["auxiliary"][s]
 
         # Stack features: [time, charge, sensor_id, auxiliary]
         pulse_features = np.stack(

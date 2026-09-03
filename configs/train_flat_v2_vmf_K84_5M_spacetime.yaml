@@ -1,0 +1,91 @@
+# v2 none K=84 ~5M params, K=3 vMF mixture, UNCLAMPED softplus + annealed
+# kappa_reg, PLUS the relative spacetime-interval attention bias.
+#
+# This is an exact copy of train_flat_v2_vmf_K3_5M_unclamped.yaml (the current
+# best vMF base config) with `use_spacetime_bias: true` added, so a
+# spacetime-vs-baseline head-to-head can be launched later by training this
+# config against the unclamped baseline under identical everything-else.
+#
+# Relative spacetime bias (DOM-level adaptation of DrHB's biggest single
+# ingredient, ~+40 bps for them):
+#   Each DOM token carries (t1, x, y, z) read from the input dom_vectors
+#   (cols 4, 0, 1, 2). A tiny shared MLP maps the per-pair relative features
+#   [Δt1, Δx, Δy, Δz, |Δr|, ds²] (ds² = Minkowski interval with a learnable
+#   speed scalar) → num_heads additive logits, added to the attention scores in
+#   every layer (shared across layers). The CLS token gets a learned per-head
+#   scalar. Adds ~500 params; off by default so existing checkpoints load.
+#
+# Comparison points (held-out 656-659 ≥1000 pulses):
+#   - K=3 mix base (clamped):       7.72° / 2.81°
+#   - K=3 unclamped base (no bias): (baseline = train_flat_v2_vmf_K3_5M_unclamped)
+#   - K=3 unclamped + spacetime bias (this): ?
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0              # safety net only — non-binding for any
+                                      # physically meaningful event (κ=10000
+                                      # ↔ σ ≈ 0.6° on S²; MLE κ for our best
+                                      # 2° events is ~1600). Bounds the
+                                      # per-step gradient on μ (∂NLL/∂μ ∝ κ)
+                                      # without capping training-time κ in
+                                      # the useful range.
+  vmf_kappa_reg: 1.0e-4               # starting value
+  vmf_kappa_reg_final: 0.0            # annealed to zero
+  vmf_kappa_reg_anneal_fraction: 0.3  # linear anneal over first 30% of steps
+
+  use_spacetime_bias: true            # relative spacetime-interval attention bias
+  spacetime_bias_hidden_dim: 32       # tiny shared per-pair MLP hidden width
+
+training:
+  epochs: 10
+  batch_size: 4096
+  lr: 3e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16            # fp32-range mantissa, no overflow on κ-scaled
+                             # backward intermediates (κ_max=10000 makes fp16
+                             # marginal). Same speed on H100.
+
+data:
+  max_events: 200000000
+  val_events: 100000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-vmf-K3-5M-unclamped-anneal-spacetime-10ep
+  tags:
+    - flat-transformer-v2
+    - K84
+    - 5M-params
+    - input-none
+    - vmf
+    - mixture-3
+    - kappa-unclamped
+    - kappa-reg-anneal
+    - spacetime-bias
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: null

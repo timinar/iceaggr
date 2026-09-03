@@ -32,7 +32,7 @@ model:
 
 training:
   optimizer: muon           # Muon on block 2D matrices + AdamW side-group
-  muon_lr: 0.02             # Muon LR (nanochat default); tune from muon_tune_10M
+  muon_lr: 0.005             # Muon LR (nanochat default); tune from muon_tune_10M
   muon_momentum: 0.95
   epochs: 10
   batch_size: 4096
@@ -44,6 +44,7 @@ training:
   amp_dtype: bf16           # Muon requires bf16 (fp16 GradScaler not wired)
 
 data:
+  fast_collate: true
   max_events: 200000000
   val_events: 100000
   num_workers: 8

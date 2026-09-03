@@ -1,0 +1,73 @@
+# Fine-tune the HYBRID raw+aggregate model on high-activity events (>= 1000 pulses).
+#
+# T1 finetune leg. Clone of configs/train_flat_v2_npe15_5M_unclamped_finetune_hi.yaml
+# with the hybrid tokenization (input_mode none), starting from the hybrid unclamped
+# combined base checkpoint (v2-hybrid-5M-combined-10ep) and continuing exclusively on
+# >= 1000-pulse events with max_doms raised to 512. kappa_reg held at 0 throughout.
+
+model:
+  version: v2
+  input_mode: linear
+  input_dim: 256            # identity: hybrid token is 256 = d_model, no projection
+  max_pulses_per_dom: 84      # default input_dim = 4 + 3*84 = 256 (= d_model)
+  d_model: 256
+  max_doms: 512
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0             # safety net (non-binding); see base config
+  vmf_kappa_reg: 0.0                 # anneal already finished in pretrain
+  vmf_angular_weight: 0.5            # combined loss: NLL + λ·angular-distance
+
+training:
+  epochs: 10
+  batch_size: 512
+  optimizer: muon           # record recipe is Muon-throughout (probe verdict 2026-07-19)
+  muon_lr: 2.5e-4
+  lr: 3e-5
+  warmup_steps: 500
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16
+
+data:
+  tokenization: hybrid
+  hybrid_mode: full
+  min_pulses: 1000
+  max_events: 200000000
+  val_events: 50000
+  num_workers: 16
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 635]
+  val_batches: [636, 660]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-hybrid-muon-mlr0075-finetune-hi1000
+  tags:
+    - flat-transformer-v2
+    - hybrid
+    - raw-plus-aggregate
+    - 5M-params
+    - input-none
+    - vmf
+    - mixture-3
+    - kappa-unclamped
+    - combined-loss
+    - finetune
+    - high-activity
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: checkpoints/v2-hybrid-muon-mlr0075-10ep/best.pt
+  finetune: true            # load model weights only, fresh optimizer+scheduler

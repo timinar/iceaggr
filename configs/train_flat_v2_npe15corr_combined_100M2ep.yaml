@@ -1,0 +1,81 @@
+# v2 NPE-15 human-summary-statistics tokenization, ~5M params, K=3 vMF mixture,
+# UNCLAMPED softplus + annealed kappa_reg.
+#
+# This is the "human summary statistics" leg of the encoding comparison. It is a
+# byte-for-byte clone of configs/train_flat_v2_vmf_K3_5M_unclamped.yaml EXCEPT for
+# the input tokenization: instead of the flat first-K pulse-concat tokens, each DOM
+# is summarized by 15 hand-crafted features (charge sums, time stats, absolute and
+# CoG-relative positions) via data.tokenization: npe15. Everything downstream — the
+# transformer trunk, the K=3 unclamped-kappa vMF head, optimizer, schedule, data
+# splits — is identical, so a head-to-head against the learned-encoding run isolates
+# the effect of the input encoding alone.
+#
+# The 15 features exactly reproduce Johann's precomputed store
+# (train_pmtfied_npe15/); see delegation/humanstats_scaled/validation.md (gate PASS,
+# 180,610 DOM rows). NOTE: t_20 and t_50 equal t_first for every DOM — a faithfully
+# reproduced quirk of the reference generator (its polars percentile runs per-pulse,
+# not per-DOM). Set data.npe_correct_percentiles: true for genuine quantile times
+# (a DIFFERENT encoding — do not mix with runs meant to reproduce the reference).
+
+model:
+  version: v2
+  input_mode: linear          # Linear(15, d_model); npe15 tokens are not 4+3K
+  input_dim: 15               # NPE-15 summary-statistics token width
+  max_pulses_per_dom: 84      # unused by the npe15 collator (kept for schema parity)
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0              # safety net only; see the vMF base config
+  vmf_kappa_reg: 1.0e-4               # starting value
+  vmf_angular_weight: 0.5
+  vmf_kappa_reg_final: 0.0            # annealed to zero
+  vmf_kappa_reg_anneal_fraction: 0.3  # linear anneal over first 30% of steps
+
+training:
+  epochs: 2
+  batch_size: 4096
+  lr: 3e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16
+
+data:
+  tokenization: npe15         # 15-dim summary-statistics DOM tokens
+  npe_correct_percentiles: true  # genuine t20/t50 (reference-store bug fixed)
+  max_events: 100000000
+  val_events: 100000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-npe15corr-5M-combined-100M2ep
+  tags:
+    - flat-transformer-v2
+    - npe15
+    - humanstats-encoding
+    - 5M-params
+    - input-linear
+    - vmf
+    - mixture-3
+    - kappa-unclamped
+    - kappa-reg-anneal
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: null

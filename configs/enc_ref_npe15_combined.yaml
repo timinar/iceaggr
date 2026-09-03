@@ -1,0 +1,61 @@
+# T2 matched-loss REFERENCE — npe15 (15-dim summary stats) @ 10M, combined loss.
+# Identical protocol/loss to the enc_preview_hybrid_* configs; only the
+# tokenization differs (npe15, input_mode linear, input_dim 15).
+model:
+  version: v2
+  input_mode: linear
+  input_dim: 15
+  max_pulses_per_dom: 84      # default input_dim = 4 + 3*84 = 256 (= d_model)
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0
+  vmf_kappa_reg: 1.0e-4
+  vmf_kappa_reg_final: 0.0
+  vmf_kappa_reg_anneal_fraction: 0.3
+  vmf_angular_weight: 0.5
+
+training:
+  epochs: 10
+  batch_size: 256
+  lr: 1e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16
+
+data:
+  tokenization: npe15
+  max_events: 10000000
+  val_events: 50000
+  num_workers: 6
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: enc-ref-npe15-combined
+  tags:
+    - encoding-comparison-preview
+    - hybrid
+    - raw-plus-aggregate
+    - input-none
+    - vmf-K3
+    - kappa-unclamped
+    - combined-loss
+
+checkpoint:
+  dir: checkpoints/enc-ref-npe15-combined
+  save_every: 5
+  resume: null

@@ -1,0 +1,63 @@
+# Muon LR sanity point — enc-preview protocol (raw K=84 none, combined loss),
+# 10M @ bs256. Clone of enc_ref_rawK84_combined.yaml with the Muon optimizer, so
+# it is directly comparable to the known AdamW@10M enc-preview references (only
+# training.optimizer / muon_lr differ). Cheap check that Muon trains at least as
+# well as AdamW under the same protocol before committing the fleet.
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 84      # default input_dim = 4 + 3*84 = 256 (= d_model)
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0
+  vmf_kappa_reg: 1.0e-4
+  vmf_kappa_reg_final: 0.0
+  vmf_kappa_reg_anneal_fraction: 0.3
+  vmf_angular_weight: 0.5
+
+training:
+  optimizer: muon           # Muon on block 2D matrices + AdamW side-group
+  muon_lr: 0.005             # Muon LR (nanochat default); the tuning knob
+  muon_momentum: 0.95
+  epochs: 2
+  batch_size: 256
+  lr: 1e-4                  # AdamW side-group (CLS/head/scalars) — matches enc_ref
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16           # Muon requires bf16 (fp16 GradScaler not wired)
+
+data:
+  tokenization: flat
+  max_events: 5000000
+  val_events: 50000
+  num_workers: 6
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: muon-sweep-lr0p005
+  tags:
+    - encoding-comparison-preview
+    - input-none
+    - vmf-K3
+    - combined-loss
+    - muon
+
+checkpoint:
+  dir: checkpoints/muon-sweep-lr0p005
+  save_every: 5
+  resume: null

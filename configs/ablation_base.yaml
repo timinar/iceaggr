@@ -1,0 +1,67 @@
+# Per-change architecture ablation — base config (full N2-T2 small model).
+#
+# Launch variants by toggling ONE feature with --ablate:
+#   none          full N2-T2 (reference)
+#   vanilla       all features off (vanilla pre-LN transformer baseline)
+#   rmsnorm       LayerNorm instead of RMSNorm
+#   qknorm        no QK-normalization
+#   relu2         GELU instead of ReLU^2
+#   zeroinit      uniform-init output projections (no zero-init)
+#   residscaling  plain residual (no per-layer x0 skip / residual scaling)
+#   bias          add biases back to the transformer linears
+#
+# Same scale as the original small ablation (K=16, d_model=128, ~0.55M params),
+# 10 epochs on 10M events, bs=256, lr=1e-4; validated on held-out batches 651-655
+# so the degrees are reproducible and comparable to the data-scaling table.
+#
+#   CUDA_VISIBLE_DEVICES=0 uv run python scripts/train_flat.py \
+#       --config configs/ablation_base.yaml --ablate none --name abl-full --no-wandb
+
+model:
+  version: v2
+  input_mode: linear
+  max_pulses_per_dom: 16
+  d_model: 128
+  max_doms: 128
+  num_heads: 8
+  num_layers: 4
+  hidden_dim: 256
+  head_hidden_dim: 128
+  dropout: 0.1
+  # per-change ablation flags (full N2-T2 defaults; --ablate toggles them)
+  use_rmsnorm: true
+  use_qknorm: true
+  use_relu2: true
+  use_zero_init: true
+  use_resid_scaling: true
+  use_bias: false
+
+training:
+  epochs: 10
+  batch_size: 256
+  lr: 1e-4
+  warmup_steps: 1000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  grad_accum_steps: 1
+
+data:
+  max_events: 10000000
+  val_events: 100000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: null
+  tags:
+    - ablation-per-change
+
+checkpoint:
+  dir: checkpoints
+  save_every: 5
+  resume: null

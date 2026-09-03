@@ -1,0 +1,90 @@
+# v2 HYBRID raw+aggregate DOM tokenization, ~5M params, K=3 vMF mixture,
+# UNCLAMPED softplus + annealed kappa_reg + combined loss (NLL + 0.5*angular).
+#
+# T1 of paper/analysis/hiE_improvement_plan.md — the main encoding bet. Each DOM
+# token is a 256-dim vector carrying BOTH the raw first-80 pulse triplets (fine
+# leading-edge timing) AND the 12 npe summary statistics minus absolute xyz
+# (whole-series integrated charge/time) plus the base [x,y,z,n]. See
+# src/iceaggr/data/collators_hybrid.py for the exact layout.
+#
+# Clone of configs/train_flat_v2_npe15_5M_unclamped.yaml EXCEPT for the input
+# tokenization: data.tokenization: hybrid (mode full) with input_mode: linear
+#   input_dim: 256.
+# Because the hybrid token is exactly 256 = d_model wide and max_pulses_per_dom
+# stays 84 (default input_dim = 4 + 3*84 = 256), NO input_dim key is needed and
+# input_mode: linear
+#   input_dim: 256 is a pure identity (no projection) — this keeps the raw SOTA's
+# per-layer x0 re-injection, which the plan (Q1) argues is load-bearing.
+# Everything downstream — trunk, K=3 unclamped-kappa vMF head, combined loss,
+# optimizer, schedule, data splits — is identical to the raw and humanstats legs,
+# so a head-to-head isolates the encoding.
+
+model:
+  version: v2
+  input_mode: linear
+  input_dim: 256            # identity: hybrid token is 256 = d_model, no projection
+  max_pulses_per_dom: 84      # default input_dim = 4 + 3*84 = 256 (= d_model); the
+                              # hybrid collator uses its own K'=80 internally
+  d_model: 256
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 1024
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+  head_type: vmf
+  vmf_components: 3
+  vmf_kappa_min: 1.0
+  vmf_kappa_max: 10000.0              # safety net only; see the vMF base config
+  vmf_kappa_reg: 1.0e-4               # starting value
+  vmf_kappa_reg_final: 0.0            # annealed to zero
+  vmf_kappa_reg_anneal_fraction: 0.3  # linear anneal over first 30% of steps
+  vmf_angular_weight: 0.5             # combined loss: NLL + λ·angular-distance
+                                      # (shared with the raw / humanstats twins so
+                                      # the encoding comparison stays isolated)
+
+training:
+  optimizer: muon
+  muon_lr: 0.0075
+  epochs: 10
+  batch_size: 4096
+  lr: 3e-4
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+  amp_dtype: bf16
+
+data:
+  fast_collate: true
+  tokenization: hybrid        # 256-dim raw+aggregate DOM tokens
+  hybrid_mode: full           # base(4) + 12 aggregate + 80 raw triplets
+  max_events: 200000000
+  val_events: 100000
+  num_workers: 16
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-hybrid-muon-mlr0075-10ep
+  tags:
+    - flat-transformer-v2
+    - hybrid
+    - raw-plus-aggregate
+    - 5M-params
+    - input-none
+    - vmf
+    - mixture-3
+    - kappa-unclamped
+    - kappa-reg-anneal
+    - combined-loss
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: null

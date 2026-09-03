@@ -1,0 +1,60 @@
+# v2 none K=169, d_model=512 (~18M params) — model-scaling frontier
+#
+# 4 + 3*169 = 511 ~= 512 = d_model: the DOM vector fills the model width with
+# 'none' (no projection), mirroring the 5M K=84 -> 256 design. The prior
+# d384/K=41/linear "10M" LOST to the 5M (55.70 vs 55.47 deg) because it
+# truncated pulses (K=41) and wasted dim on a 127->384 projection; this is the
+# width-matched scale-up that should actually extend the curve.
+#
+# Real bs=2048, no grad-accum (fits ~35GB on the H100). lr=2e-4 from a 2-epoch
+# sweep {1.5e-4:60.50, 2e-4:60.19, 3e-4:60.27 deg} -> 2e-4 is the interior
+# optimum, lower than the 5M's 3e-4 (wider model + smaller real batch).
+# ~2x the 5M per-step compute -> ~36-40h for 10 epochs.
+
+model:
+  version: v2
+  input_mode: none
+  max_pulses_per_dom: 169
+  d_model: 512
+  max_doms: 128
+  num_heads: 8
+  num_layers: 6
+  hidden_dim: 2048
+  head_hidden_dim: 1024
+  dropout: 0.1
+
+training:
+  epochs: 10
+  batch_size: 2048
+  grad_accum_steps: 1   # no accum; real bs2048 fits, LR tuned for it
+  lr: 2e-4   # from 2-epoch sweep: 2e-4 (60.19) < 3e-4 (60.27) < 1.5e-4 (60.50)
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  use_amp: true
+
+data:
+  max_events: 200000000
+  val_events: 50000
+  num_workers: 8
+  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  train_batches: [1, 650]
+  val_batches: [651, 655]
+  val_per_epoch: 5
+
+wandb:
+  enabled: true
+  project: iceaggr
+  name: v2-d512-K169-18M-lr2e4-10ep
+  tags:
+    - flat-transformer-v2
+    - K169
+    - d512
+    - 18M-params
+    - input-none
+    - model-scaling
+
+checkpoint:
+  dir: checkpoints
+  save_every: 1
+  resume: null

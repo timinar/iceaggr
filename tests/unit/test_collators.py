@@ -279,6 +279,129 @@ class TestDOMOrderPreservation:
                 "DOM indices should be monotonically increasing"
 
 
+class TestFlatCollatorTimeOrdering:
+    """Test the opt-in order_doms_by_time flag of make_collate_flat.
+
+    Uses a small synthetic batch with known per-DOM first-pulse times so the
+    expected token ordering is unambiguous.
+    """
+
+    # sensor_id -> (earliest pulse time). Deliberately chosen so that ascending
+    # time does NOT match ascending sensor_id, otherwise the two orderings would
+    # coincide and the test would not distinguish them.
+    EVENT0 = {  # sensor_id: earliest_time
+        10: 300.0,
+        11: 100.0,
+        12: 200.0,
+    }
+    EVENT1 = {
+        20: 50.0,
+        21: 400.0,
+        22: 150.0,
+    }
+
+    @pytest.fixture
+    def geometry(self, tmp_path):
+        """Tiny synthetic geometry with one distinct position per sensor_id.
+
+        Each DOM gets a unique x so a token row can be mapped back to its
+        sensor_id (and therefore its known earliest time) from the geometry
+        columns of the flat DOM vector.
+        """
+        lines = ["sensor_id,x,y,z"]
+        for sid in [10, 11, 12, 20, 21, 22]:
+            # x = sensor_id (distinct, normalized small), y/z fixed
+            lines.append(f"{sid},{sid * 0.001},0.0,0.0")
+        csv_path = tmp_path / "geom.csv"
+        csv_path.write_text("\n".join(lines) + "\n")
+        return GeometryLoader(str(csv_path))
+
+    @staticmethod
+    def _make_event(event_id, dom_times):
+        """Build one event dict. Each DOM gets two pulses; the earlier one sets
+        dom_min_time. Pulses are appended in a shuffled order to exercise the
+        within-DOM sort path."""
+        rows = []
+        for sid, t0 in dom_times.items():
+            # two pulses for the DOM; second is later so min_time == t0
+            rows.append([t0 + 5.0, 1.0, float(sid), 0.0])  # later pulse first
+            rows.append([t0, 1.0, float(sid), 0.0])         # earliest pulse
+        pulse_features = torch.tensor(rows, dtype=torch.float32)
+        return {
+            "pulse_features": pulse_features,
+            "event_id": torch.tensor(event_id, dtype=torch.long),
+            "target": torch.tensor([0.1, 0.2], dtype=torch.float32),
+        }
+
+    @pytest.fixture
+    def batch(self):
+        return [self._make_event(0, self.EVENT0), self._make_event(1, self.EVENT1)]
+
+    def test_off_is_byte_identical(self, geometry, batch):
+        """order_doms_by_time=False must reproduce the historical (default-arg)
+        output exactly, byte-for-byte."""
+        default_fn = make_collate_flat(geometry, max_pulses_per_dom=4, max_doms=8)
+        explicit_off_fn = make_collate_flat(
+            geometry, max_pulses_per_dom=4, max_doms=8, order_doms_by_time=False
+        )
+        out_default = default_fn(batch)
+        out_off = explicit_off_fn(batch)
+
+        for key in out_default:
+            if isinstance(out_default[key], torch.Tensor):
+                assert torch.equal(out_default[key], out_off[key]), \
+                    f"order_doms_by_time=False changed '{key}'"
+            else:
+                assert out_default[key] == out_off[key], f"mismatch in '{key}'"
+
+    def _sensor_x_lookup(self, geometry):
+        """Map normalized x-coordinate back to sensor_id for row identification."""
+        return {sid: geometry[torch.tensor([sid])][0, 0].item()
+                for sid in [10, 11, 12, 20, 21, 22]}
+
+    def test_on_reorders_by_min_time(self, geometry, batch):
+        """order_doms_by_time=True keeps the same multiset of DOM rows per event
+        but orders them so dom_min_time is non-decreasing along the sequence."""
+        off_fn = make_collate_flat(geometry, max_pulses_per_dom=4, max_doms=8)
+        on_fn = make_collate_flat(
+            geometry, max_pulses_per_dom=4, max_doms=8, order_doms_by_time=True
+        )
+        out_off = off_fn(batch)
+        out_on = on_fn(batch)
+
+        # Same kept DOMs per event (mask unchanged).
+        assert torch.equal(out_off["padding_mask"], out_on["padding_mask"])
+
+        x_to_sid = self._sensor_x_lookup(geometry)
+        times = {**self.EVENT0, **self.EVENT1}
+
+        def sid_of_row(row):
+            x = row[0].item()
+            best = min(x_to_sid, key=lambda s: abs(x_to_sid[s] - x))
+            return best
+
+        for ev, dom_times in enumerate([self.EVENT0, self.EVENT1]):
+            mask = out_on["padding_mask"][ev]
+            on_rows = out_on["dom_vectors"][ev][mask]
+            off_rows = out_off["dom_vectors"][ev][mask]
+
+            # (a) same multiset of token rows (sort rows lexicographically)
+            on_sorted = on_rows[on_rows[:, 0].argsort(stable=True)]
+            off_sorted = off_rows[off_rows[:, 0].argsort(stable=True)]
+            assert torch.allclose(on_sorted, off_sorted), \
+                f"event {ev}: time-ordering changed the set of DOM rows"
+
+            # (b) along the time-ordered sequence, dom_min_time is non-decreasing
+            seq_times = [times[sid_of_row(r)] for r in on_rows]
+            assert seq_times == sorted(seq_times), \
+                f"event {ev}: tokens not in non-decreasing min-time order: {seq_times}"
+
+            # sanity: this batch actually differs from sensor order
+            off_times = [times[sid_of_row(r)] for r in off_rows]
+            assert off_times != seq_times, \
+                f"event {ev}: test batch fails to distinguish the two orderings"
+
+
 class TestFlatCollatorPadAssembly:
     """Guard the pad-assembly fast path in make_collate_flat.
 
