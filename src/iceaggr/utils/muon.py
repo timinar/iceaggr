@@ -102,29 +102,49 @@ class Muon(torch.optim.Optimizer):
             ns_steps = group["ns_steps"]
             weight_decay = group["weight_decay"]
 
+            # Bucket the matrices by shape so every same-shaped one (e.g. the 4·L
+            # attention projections) goes through ONE batched Newton–Schulz and
+            # fused ``_foreach`` momentum/weight updates. The per-matrix math is
+            # unchanged — NS normalizes and iterates each leading-dim slice
+            # independently — only the kernel-launch count drops (a d256-L24 model
+            # has 144 matrices → 3 buckets; the per-matrix Python loop of ~20 tiny
+            # launches each left the GPU idle for ~100 ms per optimizer step).
+            buckets: dict[tuple, list[Tensor]] = {}
             for p in group["params"]:
-                g = p.grad
-                if g is None:
+                if p.grad is None:
                     continue
-                assert g.ndim == 2, (
+                assert p.grad.ndim == 2, (
                     f"Muon expects 2D weight matrices, got shape {tuple(p.shape)}"
                 )
-                state = self.state[p]
-                buf = state.get("momentum_buffer")
-                if buf is None:
-                    buf = state["momentum_buffer"] = torch.zeros_like(g)
+                buckets.setdefault(tuple(p.shape), []).append(p)
+
+            for shape, params in buckets.items():
+                grads = [p.grad for p in params]
+                bufs = []
+                for p in params:
+                    state = self.state[p]
+                    buf = state.get("momentum_buffer")
+                    if buf is None:
+                        buf = state["momentum_buffer"] = torch.zeros_like(p.grad)
+                    bufs.append(buf)
 
                 # EMA momentum, then (optional) Nesterov lookahead. lerp_(x, w)
                 # computes (1 - w) * self + w * x in place.
-                buf.lerp_(g, 1.0 - momentum)
-                update = g.lerp_(buf, momentum) if nesterov else buf
+                torch._foreach_lerp_(bufs, grads, 1.0 - momentum)
+                if nesterov:
+                    torch._foreach_lerp_(grads, bufs, momentum)
+                    updates = grads
+                else:
+                    updates = bufs
 
-                update = zeropower_via_newtonschulz5(update, steps=ns_steps)
-                scale = max(1.0, p.size(-2) / p.size(-1)) ** 0.5
+                update = zeropower_via_newtonschulz5(torch.stack(updates), steps=ns_steps)
+                scale = max(1.0, shape[0] / shape[1]) ** 0.5
 
                 if weight_decay != 0.0:
-                    p.mul_(1.0 - lr * weight_decay)
-                p.add_(update.to(p.dtype), alpha=-lr * scale)
+                    torch._foreach_mul_(params, 1.0 - lr * weight_decay)
+                torch._foreach_add_(
+                    params, list(update.to(params[0].dtype).unbind(0)), alpha=-lr * scale
+                )
 
         return loss
 

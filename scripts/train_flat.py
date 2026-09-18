@@ -314,7 +314,11 @@ def create_dataloader(
         collate_fn=collate_fn,
         pin_memory=True,
         persistent_workers=num_workers > 0,
-        prefetch_factor=4 if num_workers > 0 else None,
+        # data.prefetch_factor (default 4): in-flight batches per worker. Each one is a
+        # pinned ~134 MB buffer; workers x prefetch x batch bytes of page-pinning churn
+        # is a box-wide cost (kernel time that slows every job's H2D thread), so a
+        # many-worker job should lower it rather than raise it.
+        prefetch_factor=int(config['data'].get('prefetch_factor', 4)) if num_workers > 0 else None,
         worker_init_fn=_worker_init_fn if num_workers > 0 else None,
         generator=loader_gen,
     )
@@ -471,22 +475,29 @@ def train_epoch(
     """
     model.train()
 
-    total_loss = 0.0
+    # Running sums live on the GPU: a per-step ``.item()`` forces a device sync
+    # every micro-batch, which exposes the host's launch overhead for the next
+    # step (measured: ~20% GPU idle at bs 1024 / L24). They are read back only
+    # at the 25-batch log points, at validation and at the end of the epoch.
+    loss_sum = torch.zeros((), device=device)
     n_batches = len(loader)  # full epoch batch count (for progress display)
     n_trained = 0
     start_time = time.time()
     head_type = config['model'].get('head_type', 'directional')
     total_steps = n_batches * config['training']['epochs']
     current_kappa_reg = None  # set each step when head_type == 'vmf'
-    window_gn_sum, window_clipped, window_steps = 0.0, 0, 0  # grad-norm window stats
+    # grad-norm window stats (GPU tensors, same reason as loss_sum)
+    window_gn_sum = torch.zeros((), device=device)
+    window_clipped = torch.zeros((), dtype=torch.long, device=device)
+    window_steps = torch.zeros((), dtype=torch.long, device=device)
 
     optimizer.zero_grad(set_to_none=True)
 
     for batch_idx, batch in enumerate(loader):
         actual_batch = start_batch + batch_idx
-        dom_vectors = batch['dom_vectors'].to(device)
-        padding_mask = batch['padding_mask'].to(device)
-        targets = batch['targets'].to(device)
+        dom_vectors = batch['dom_vectors'].to(device, non_blocking=True)
+        padding_mask = batch['padding_mask'].to(device, non_blocking=True)
+        targets = batch['targets'].to(device, non_blocking=True)
 
         # vMF: apply kappa_reg schedule (in-place on buffer so torch.compile
         # sees the update without recompiling).
@@ -522,17 +533,16 @@ def train_epoch(
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip)
             # Pre-clip norm + clip rate since the last log line (scaling-ladder
             # diagnostic: a >10% clip rate means LR/clip need tuning, not the model).
-            gn = float(grad_norm)
-            if math.isfinite(gn):
-                window_gn_sum += gn
-                window_clipped += int(gn > clip)
-                window_steps += 1
+            finite = torch.isfinite(grad_norm)
+            window_gn_sum += torch.where(finite, grad_norm, 0.0)
+            window_clipped += finite & (grad_norm > clip)
+            window_steps += finite
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()  # OneCycleLR steps per optimizer step
             optimizer.zero_grad(set_to_none=True)
 
-        total_loss += loss.item()
+        loss_sum += loss.detach()
         n_trained += 1
 
         # Log to wandb
@@ -543,10 +553,11 @@ def train_epoch(
                 "train/loss": loss.item(),
                 "train/lr": current_lr,
             }
-            if window_steps > 0:
-                log_payload["train/grad_norm"] = window_gn_sum / window_steps
-                log_payload["train/clip_frac"] = window_clipped / window_steps
-                window_gn_sum, window_clipped, window_steps = 0.0, 0, 0
+            ws = int(window_steps)
+            if ws > 0:
+                log_payload["train/grad_norm"] = window_gn_sum.item() / ws
+                log_payload["train/clip_frac"] = window_clipped.item() / ws
+                window_gn_sum.zero_(); window_clipped.zero_(); window_steps.zero_()
             if head_type != 'vmf':
                 log_payload["train/loss_deg"] = torch.rad2deg(torch.tensor(loss.item())).item()
             else:
@@ -556,7 +567,7 @@ def train_epoch(
         # Progress every 25 batches
         if (actual_batch + 1) % 25 == 0:
             elapsed = time.time() - start_time
-            avg_loss = total_loss / n_trained
+            avg_loss = loss_sum.item() / n_trained
             speed = n_trained / elapsed
             if head_type == 'vmf':
                 loss_str = f"NLL: {avg_loss:.4f}"
@@ -599,7 +610,7 @@ def train_epoch(
                     'model': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'scheduler': scheduler.state_dict(),
-                    'train_loss': total_loss / n_trained,
+                    'train_loss': loss_sum.item() / n_trained,
                     'val_loss': val_loss,
                     'val_angular_error_rad': val_ang_err,
                     'best_loss': best_loss,
@@ -611,7 +622,7 @@ def train_epoch(
             # Switch back to training mode
             model.train()
 
-    return total_loss / n_trained if n_trained > 0 else 0.0, best_loss
+    return loss_sum.item() / n_trained if n_trained > 0 else 0.0, best_loss
 
 
 # Pulse-count thresholds for the sliced validation metrics (val/angular_error_deg_geN).
@@ -643,9 +654,9 @@ def validate(model: nn.Module, loader: DataLoader, device: str, config: dict) ->
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(loader):
-            dom_vectors = batch['dom_vectors'].to(device)
-            padding_mask = batch['padding_mask'].to(device)
-            targets = batch['targets'].to(device)
+            dom_vectors = batch['dom_vectors'].to(device, non_blocking=True)
+            padding_mask = batch['padding_mask'].to(device, non_blocking=True)
+            targets = batch['targets'].to(device, non_blocking=True)
 
             with torch.autocast(device_type='cuda', dtype=_amp_dtype(config), enabled=config['training']['use_amp']):
                 if head_type == 'vmf':
@@ -819,14 +830,17 @@ def main():
     loader, train_sampler = create_dataloader(config, geometry, batch_range=train_batch_range)
     logger.info(f"Training: {len(loader.dataset):,} events, {len(loader):,} batches, bs={config['training']['batch_size']}")
 
-    # Create validation dataloader
+    # Create validation dataloader. Eval loaders default to min(8, num_workers)
+    # workers (data.eval_workers overrides): with 2 the hybrid collator made a
+    # 196-batch validation loader-bound (58 s at ~3 b/s, GPU half idle).
+    eval_workers = int(config['data'].get('eval_workers', min(8, int(config['data']['num_workers']))))
     val_loader = None
     if val_batch_range is not None:
         val_loader, _ = create_dataloader(
             config, geometry,
             batch_range=val_batch_range,
             max_events=config['data'].get('val_events'),
-            num_workers=2,
+            num_workers=eval_workers,
         )
         logger.info(f"Validation: {len(val_loader.dataset):,} events, {len(val_loader):,} batches")
 
@@ -839,7 +853,7 @@ def main():
     if n_train_eval and train_batch_range is not None:
         te_range = tuple(config['data'].get('train_eval_batches', (train_batch_range[0], train_batch_range[0])))
         train_eval_loader, _ = create_dataloader(
-            config, geometry, batch_range=te_range, max_events=int(n_train_eval), num_workers=2,
+            config, geometry, batch_range=te_range, max_events=int(n_train_eval), num_workers=eval_workers,
         )
         logger.info(f"Train-eval: {len(train_eval_loader.dataset):,} events from batches {te_range}")
 
@@ -925,7 +939,7 @@ def main():
         logger.info(f"Mid-epoch validation: {val_per_epoch} times/epoch (every {val_interval} batches)")
 
     checkpoint_dir = Path(config['checkpoint']['dir'])
-    checkpoint_dir.mkdir(exist_ok=True)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)  # e.g. checkpoints/ladder on a fresh checkout
 
     # Per-run checkpoint subdirectory
     run_checkpoint_dir = checkpoint_dir / run_name

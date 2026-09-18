@@ -264,3 +264,65 @@ class TestBuildOptimizer:
         cfg = self._config("rmsprop")
         with pytest.raises(ValueError, match="Unknown training.optimizer"):
             train_flat.build_optimizer_and_scheduler(model, cfg, total_steps=100, pct_start=0.1)
+
+
+class TestBatchedStepMatchesReference:
+    """The shape-bucketed step (one batched Newton–Schulz per shape) must produce
+    the same parameters and momentum buffers as the original per-matrix loop.
+    Differences are limited to bf16 rounding inside the batched matmuls."""
+
+    @staticmethod
+    @torch.no_grad()
+    def _reference_step(params, lr, momentum, nesterov, ns_steps, weight_decay, bufs):
+        for p in params:
+            g = p.grad
+            buf = bufs[id(p)]
+            buf.lerp_(g, 1.0 - momentum)
+            update = g.lerp_(buf, momentum) if nesterov else buf
+            update = zeropower_via_newtonschulz5(update, steps=ns_steps)
+            scale = max(1.0, p.size(-2) / p.size(-1)) ** 0.5
+            if weight_decay != 0.0:
+                p.mul_(1.0 - lr * weight_decay)
+            p.add_(update.to(p.dtype), alpha=-lr * scale)
+
+    @pytest.mark.parametrize("nesterov", [True, False])
+    def test_two_steps_match(self, nesterov):
+        torch.manual_seed(0)
+        shapes = [(32, 32)] * 6 + [(64, 32)] * 3 + [(32, 64)] * 3  # three buckets
+        base = [torch.randn(*s) for s in shapes]
+        grads = [[torch.randn(*s) for s in shapes] for _ in range(2)]
+
+        ref = [torch.nn.Parameter(t.clone()) for t in base]
+        ref_bufs = {id(p): torch.zeros_like(p) for p in ref}
+        new = [torch.nn.Parameter(t.clone()) for t in base]
+        opt = Muon(new, lr=0.02, momentum=0.9, nesterov=nesterov, ns_steps=5, weight_decay=0.01)
+
+        for step_grads in grads:
+            for p, g in zip(ref, step_grads):
+                p.grad = g.clone()
+            for p, g in zip(new, step_grads):
+                p.grad = g.clone()
+            self._reference_step(ref, 0.02, 0.9, nesterov, 5, 0.01, ref_bufs)
+            opt.step()
+
+        for i, (p_ref, p_new) in enumerate(zip(ref, new)):
+            delta = (p_new.detach() - p_ref.detach()).abs().max().item()
+            step_size = (p_ref.detach() - base[i]).abs().max().item()
+            # bf16 NS rounding: well below 1% of the update itself
+            assert delta < 1e-2 * step_size, (delta, step_size)
+            assert torch.allclose(
+                opt.state[p_new]["momentum_buffer"], ref_bufs[id(p_ref)], atol=1e-6, rtol=1e-5
+            )
+
+    def test_state_dict_layout_unchanged(self):
+        """Checkpoints from the per-matrix implementation must still load."""
+        torch.manual_seed(1)
+        params = [torch.nn.Parameter(torch.randn(16, 16)) for _ in range(3)]
+        opt = Muon(params, lr=0.01)
+        for p in params:
+            p.grad = torch.randn_like(p)
+        opt.step()
+        sd = opt.state_dict()
+        assert set(sd["state"].keys()) == {0, 1, 2}
+        assert set(sd["state"][0].keys()) == {"momentum_buffer"}
+        assert sd["state"][0]["momentum_buffer"].shape == (16, 16)

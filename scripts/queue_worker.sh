@@ -52,7 +52,7 @@ on_signal() {
   fi
   exit 143
 }
-trap on_signal TERM INT
+trap on_signal TERM INT HUP   # HUP: the screen/tty wrapper went away — release the job, don't orphan it
 
 idle=0
 while true; do

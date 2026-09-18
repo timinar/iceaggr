@@ -31,8 +31,8 @@ def summarize(run):
         "muon_lr": t.get("muon_lr") if t.get("optimizer", "adamw") == "muon" else None,
         "lr": t.get("lr"), "seed": t.get("seed"), "drop": m.get("dropout"),
     }
-    if len(ep) == 0 or key not in ep:
-        return row
+    if len(ep) == 0 or key not in ep or "epoch" not in ep:
+        return row  # e.g. a run killed before its first epoch-end log
     i = ep[key].idxmin()
     b = ep.loc[i]
     row.update({
