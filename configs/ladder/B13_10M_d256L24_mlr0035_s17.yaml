@@ -30,12 +30,13 @@ training:
   use_amp: true
   amp_dtype: bf16
   seed: 17
+  main_threads: 4
 data:
   fast_collate: true
   max_events: 10000000
   val_events: 200000
-  num_workers: 8
-  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  num_workers: 12
+  geometry_path: /data/inar/icecube_kaggle/sensor_geometry_normalized.csv
   train_batches:
   - 1
   - 650
@@ -53,6 +54,7 @@ wandb:
   - events-10000000
   - d256-L24
   - params-19.2M
+  - tok-flat
   - muon-lr-0.0035
   - stageB
 checkpoint:

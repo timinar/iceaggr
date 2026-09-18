@@ -1,11 +1,11 @@
 model:
   version: v2
-  input_mode: linear
+  input_mode: none
   max_pulses_per_dom: 84
   d_model: 256
   max_doms: 128
   num_heads: 8
-  num_layers: 12
+  num_layers: 24
   hidden_dim: 1024
   head_hidden_dim: 1024
   dropout: 0.1
@@ -21,7 +21,7 @@ training:
   optimizer: muon
   muon_lr: 0.005
   muon_momentum: 0.95
-  epochs: 5
+  epochs: 10
   batch_size: 1024
   lr: 0.0003
   warmup_steps: 2000
@@ -29,11 +29,12 @@ training:
   gradient_clip: 1.0
   use_amp: true
   amp_dtype: bf16
-  seed: 17
+  seed: 41
+  grad_accum_steps: 4
   main_threads: 4
 data:
   fast_collate: true
-  max_events: 10000000
+  max_events: 130000000
   val_events: 200000
   num_workers: 12
   geometry_path: /data/inar/icecube_kaggle/sensor_geometry_normalized.csv
@@ -43,24 +44,24 @@ data:
   val_batches:
   - 651
   - 655
-  val_per_epoch: 2
+  val_per_epoch: 5
   train_eval_events: 200000
 wandb:
   enabled: true
   project: iceaggr
-  name: B08_10M_d256L12lin_mlr005_s17
+  name: F05_130M_d256L24_s41
   tags:
   - scaling-ladder
-  - events-10000000
-  - d256-L12
-  - params-9.8M
+  - events-130000000
+  - d256-L24
+  - params-19.2M
   - tok-flat
   - muon-lr-0.005
-  - stageB
+  - stageC-130M
 checkpoint:
   dir: checkpoints/ladder
-  save_every: 100
+  save_every: 1
   resume: null
 _ladder:
-  n_params: 9781799
-  note: 'Stage B: L12 + linear input'
+  n_params: 19153215
+  note: '130M: depth-24 seed replicate'

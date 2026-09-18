@@ -239,3 +239,9 @@ delegation/**/*.npz
 # Only the scaling-program delegation tree is versioned; older Codex trees duplicate source / hold local paths
 delegation/*
 !delegation/scaling-sol/
+
+# fleet evaluations: keep the tables, not the per-event predictions/logs
+evals/**/*.parquet
+evals/**/*.log
+evals/test_656_659/jobs.txt
+evals/test_656_659/runner*.sh

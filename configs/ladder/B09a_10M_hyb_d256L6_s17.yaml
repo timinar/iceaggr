@@ -31,13 +31,13 @@ training:
   use_amp: true
   amp_dtype: bf16
   seed: 17
-  main_threads: 8
+  main_threads: 4
 data:
   fast_collate: true
   max_events: 10000000
   val_events: 200000
   num_workers: 12
-  geometry_path: /groups/pheno/inar/icecube_kaggle/sensor_geometry_normalized.csv
+  geometry_path: /data/inar/icecube_kaggle/sensor_geometry_normalized.csv
   train_batches:
   - 1
   - 650
@@ -66,4 +66,4 @@ checkpoint:
   resume: null
 _ladder:
   n_params: 5063195
-  note: 'Stage B: HYBRID tokens (record hi-E tokenization), 5M control'
+  note: 'Stage B: HYBRID tokens, 5M control'
