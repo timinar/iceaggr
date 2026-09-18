@@ -87,7 +87,7 @@ Validation 200–999 is only available for finetunes that were scored on ≥200 
 
 **A learned linear input layer is worth as much as doubling the depth.** On the 6-layer raw model −0.11° bulk / −0.42° on ≥1000 (F11 vs F02); on top of 24 layers a further −0.09° / −0.24° (F03 vs F01). The 2×2 (F02, F11, F01, F03) is additive: depth + linear = −0.25° bulk, −0.80° on ≥1000, and the same additivity holds after finetuning (each lever −0.32° on ≥1000; F02ft 5.83 → F11ft 5.50 / F01ft 5.51 → F03ft 5.19).
 
-**Hybrid statistics vs raw pulses.** The hybrid tokenization costs 0.6° on the bulk at every depth and buys 0.3° on ≥1000 before finetuning. After the finetune the bright-event edge shrinks to 0.05–0.11° (F07ft/F10ft vs F03ft, one to two standard errors, and the same on test: 5.47/5.51 vs 5.53/5.57), while the raw finetunes lead by 0.2–0.4° on 200–999 pulses. Depth pays for hybrid too (−0.12 to −0.15° bulk, −0.26 to −0.33° on ≥1000), half the raw gain. Conclusion: the hand-computed statistics compensated for a shallow model; with depth and a learned input layer raw pulses match them on the brightest events and win everywhere else.
+**Hybrid statistics vs raw pulses.** The hybrid tokenization costs 0.6° on the bulk at every depth and buys 0.3° on ≥1000 before finetuning. After the finetune the bright-event edge shrinks to 0.05–0.13° (hybrid pair F07ft/F10ft vs raw pair F03ft/F20ft, both finetuned on ≥1000: on validation +0.02 to +0.13, on test +0.02 to +0.13, one to two standard errors), while the raw finetunes lead by 0.2–0.4° on 200–999 pulses (on test F20ft vs F07ft/F10ft: −0.32 / −0.21 ± 0.08). Depth pays for hybrid too (−0.12 to −0.15° bulk, −0.26 to −0.33° on ≥1000), half the raw gain. Conclusion: the hand-computed statistics compensated for a shallow model; with depth and a learned input layer raw pulses match them on the brightest events and win everywhere else.
 
 **Dropout 0.1 helps only the small models.** Removing it gains 0.07–0.11° bulk and 0.24° on ≥1000 at 6 layers on raw tokens (F14 vs F02/F12; and −0.17° after finetuning), 0.06° at 6 layers on hybrid (F13), and nothing at 24 layers on either tokenization, before or after finetuning (F19 vs F03: +0.02 ± 0.01°; F18 vs F07/F10: −0.04/−0.01°; F19ft vs F03ft: +0.03; F18ft vs F07ft: +0.01).
 
@@ -121,7 +121,7 @@ Bundles prepared for copying (same directory; verify with the md5):
 
 | bundle | contents | size | md5 |
 |---|---|---|---|
-| `ladder_best_20260918.tar` | `<run>/best.pt` for all 50 runs + `configs/<run>.yaml` + `fleet_table.md`, `final_table.{md,csv}` + README | 5.6 GB | `ddf436da6250ba352c855ab68b0d638c` |
+| `ladder_best_20260918.tar` | `<run>/best.pt` for all 51 finished runs + `configs/<run>.yaml` + `fleet_table.md`, `final_table.{md,csv}` + README | 5.8 GB | `f2272472f2dae0010b21e608002da00c` |
 | `ladder_headline_all_epochs_20260918.tar` | every epoch checkpoint of F20 and F20ft_hi500 (+ configs) | 3.2 GB | `112febaf1c11fdc663ef8bca97cf56f4` |
 | `ladder_final/<run>.pt` (directory, not tarred) | weights-only copies of every best checkpoint (model, config, epoch, dev metrics; optimizer state stripped) | 3.0 GB | — |
 
@@ -142,7 +142,7 @@ Loading (any checkpoint): `ckpt = torch.load(path, map_location="cpu", weights_o
 
 ## 8. Open items
 
-- F20ft_hi1000 (≥1000 finetune of F20, the second raw base seed for the raw-vs-hybrid bright-event pair): running, finishes 2026-09-18 evening; row to be added.
+- F20ft_hi1000 (≥1000 finetune of F20): done 2026-09-18 16:24; validation ≥1000 5.21° (F03ft 5.19°, +0.02 ± 0.04), test 5.60° (F03ft 5.62°). The raw-vs-hybrid ≥1000 comparison is now symmetric on two seeds each: hybrid leads by 0.08–0.13° (validation) / 0.09–0.13° (test), raw leads 200–999 by 0.21–0.32° on test. The ≥500 finetune of the same base beats its ≥1000 finetune on both slices on test (−0.07° on ≥1000, −0.12° on 200–999), confirming the ≥500 recipe.
 - F21_130M_d256L24lin_adamw_s41 (AdamW twin of F20): running, ~5 days; answers whether the depth gain depends on Muon.
 - Longer base schedule (15 or 20 epochs of the F20 recipe): under discussion; "best = last epoch" is a property of the OneCycle schedule, not evidence either way, but the negative train–dev gaps suggest headroom.
 - Head-to-head with the Kaggle 2nd-place solution needs its predictions on batches 656–659 (on the cluster, not on this box).
