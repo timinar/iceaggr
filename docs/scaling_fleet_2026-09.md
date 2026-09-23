@@ -124,7 +124,7 @@ Bundles prepared for copying (same directory; verify with the md5):
 
 | bundle | contents | size | md5 |
 |---|---|---|---|
-| `ladder_best_20260918.tar` | `<run>/best.pt` for all 52 runs + `configs/<run>.yaml` + `fleet_table.md`, `final_table.{md,csv}` + README | 5.9 GB | `98f77df12b40575f73c92c0c27d0c5f0` |
+| `ladder_best_20260918.tar` | `<run>/best.pt` for all 52 runs + `configs/<run>.yaml` + `fleet_table.md`, `final_table.{md,csv}` + README | 6.0G | `98f77df12b40575f73c92c0c27d0c5f0` |
 | `ladder_headline_all_epochs_20260918.tar` | every epoch checkpoint of F20 and F20ft_hi500 (+ configs) | 3.2 GB | `112febaf1c11fdc663ef8bca97cf56f4` |
 | `ladder_final/<run>.pt` (directory, not tarred) | weights-only copies of every best checkpoint (model, config, epoch, dev metrics; optimizer state stripped) | 3.0 GB | — |
 
