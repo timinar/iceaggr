@@ -45,9 +45,10 @@ The paper's draft said model scaling saturates (a 19M-parameter model, 6 layers 
 | F19_130M_d256L24lin_drop0_s17 | 24 layers, raw (84 pulses), input learned linear, dropout 0.0, Muon lr 0.005, seed 17, 130.0M events, 10 ep | 19.2M | 55.37 / 47.66 | 5.79 | 55.44 / 47.72 | 57.44 | 27.16 | 6.13 / 1.31 |
 | F20_130M_d256L24lin_s41 | 24 layers, raw (84 pulses), input learned linear, dropout 0.1, Muon lr 0.005, seed 41, 130.0M events, 10 ep | 19.2M | 55.32 / 47.58 | 5.72 | 55.39 / 47.66 | 57.40 | 27.06 | 6.07 / 1.29 |
 | B14_10M_d256L36_mlr005_s17 | 36 layers, raw (84 pulses), input none, dropout 0.1, Muon lr 0.005, seed 17, 10.0M events, 5 ep | 28.6M | — / — | — | 56.26 / 48.91 | 58.19 | 29.03 | 8.49 / 2.39 |
+| F21_130M_d256L24lin_adamw_s41 | 24 layers, raw (84 pulses), input learned linear, dropout 0.1, AdamW lr 3e-4, seed 41, 130.0M events, 10 ep | 19.2M | 55.49 / 47.85 | 6.27 | 55.56 / 47.89 | 57.57 | 27.40 | 6.54 / 1.59 |
 | F06_130M_d256L36_s17 | 36 layers, raw (84 pulses), input none, dropout 0.1, Muon lr 0.005, seed 17, 130.0M events, 10 ep | 28.6M | 55.49 / 47.83 | 6.13 | 55.59 / 47.91 | 57.59 | 27.39 | 6.44 / 1.52 |
 
-10M-event runs (B09, B09a, B09b, B12, B13, B14) have no validation column: they were dev-selected on batch 651 only; their test numbers are shown for completeness. F21 (AdamW twin of F20) is still training; its row fills in when it finishes.
+10M-event runs (B09, B09a, B09b, B12, B13, B14) have no validation column: they were dev-selected on batch 651 only; their test numbers are shown for completeness. F21 is the AdamW twin of F20 (same recipe, AdamW 3e-4 instead of Muon).
 
 ## 3. Finetuned (hi-E) models: validation and test on events with ≥200 pulses
 
@@ -93,6 +94,8 @@ Validation 200–999 is only available for finetunes that were scored on ≥200 
 
 **Muon learning rate.** 0.0035 and 0.005 are indistinguishable at 24 layers on both tokenizations (F09 vs F01: −0.02 ± 0.01° bulk; F17 vs F07/F10: −0.04/0.00). The 10M ladder's preference for 0.0035 did not carry over; the mid-run dev-NLL jitter at 0.005 costs nothing at the end.
 
+**Optimizer.** The depth gain depends on Muon. F21, the exact AdamW twin of the headline model F20 (24 layers, learned input layer, seed 41, AdamW 3e-4 throughout), trails it by +0.17 ± 0.01° on the bulk and +0.47 to +0.55° on ≥1000 pulses on both validation and test, and lands exactly on the Muon 6-layer-plus-linear model F11 (−0.01 / 0.00° bulk). It still beats the plain Muon 6-layer control by 0.12–0.14° bulk, so depth helps under AdamW too, but at half the size, and a 6-layer Muon model already matches a 24-layer AdamW one. This also explains part of the paper's original "saturation" finding, which used AdamW.
+
 **Seeds.** Five base seed pairs (F02/F12, F01/F05, F03/F20, F07/F10, F08/F16): 0.01–0.05° on the bulk, ≤0.1° on the slices (the largest, F03/F20 on ≥1000, 0.12°). Finetune-only replicate (F03ft seeds): 0.02°. Base+finetune pairs (F07ft/F10ft, F01ft/F05ft, F08ft/F16ft): 0.02–0.06°.
 
 **Old vs new on identical events.** The July record recipe (hybrid 5M base + ≥1000 finetune) re-run under this protocol reproduces its July dev number (5.75° vs 5.76°) and scores 5.29° on the validation bright events, 5.71° on test. The new finetunes beat it by 0.11–0.22° on ≥1000 (validation) and by 0.15–0.25° on test; the raw deep base beats its base by 0.7° on the bulk. Absolute bright-event numbers must not be compared across event sets (the validation batches' bright events are ~0.4° easier than the July validation set and ~0.4° easier than the test batches).
@@ -121,7 +124,7 @@ Bundles prepared for copying (same directory; verify with the md5):
 
 | bundle | contents | size | md5 |
 |---|---|---|---|
-| `ladder_best_20260918.tar` | `<run>/best.pt` for all 51 finished runs + `configs/<run>.yaml` + `fleet_table.md`, `final_table.{md,csv}` + README | 5.8 GB | `f2272472f2dae0010b21e608002da00c` |
+| `ladder_best_20260918.tar` | `<run>/best.pt` for all 52 runs + `configs/<run>.yaml` + `fleet_table.md`, `final_table.{md,csv}` + README | 5.9 GB | `98f77df12b40575f73c92c0c27d0c5f0` |
 | `ladder_headline_all_epochs_20260918.tar` | every epoch checkpoint of F20 and F20ft_hi500 (+ configs) | 3.2 GB | `112febaf1c11fdc663ef8bca97cf56f4` |
 | `ladder_final/<run>.pt` (directory, not tarred) | weights-only copies of every best checkpoint (model, config, epoch, dev metrics; optimizer state stripped) | 3.0 GB | — |
 
@@ -143,7 +146,7 @@ Loading (any checkpoint): `ckpt = torch.load(path, map_location="cpu", weights_o
 ## 8. Open items
 
 - F20ft_hi1000 (≥1000 finetune of F20): done 2026-09-18 16:24; validation ≥1000 5.21° (F03ft 5.19°, +0.02 ± 0.04), test 5.60° (F03ft 5.62°). The raw-vs-hybrid ≥1000 comparison is now symmetric on two seeds each: hybrid leads by 0.08–0.13° (validation) / 0.09–0.13° (test), raw leads 200–999 by 0.21–0.32° on test. The ≥500 finetune of the same base beats its ≥1000 finetune on both slices on test (−0.07° on ≥1000, −0.12° on 200–999), confirming the ≥500 recipe.
-- F21_130M_d256L24lin_adamw_s41 (AdamW twin of F20): running, ~5 days; answers whether the depth gain depends on Muon.
+- F21_130M_d256L24lin_adamw_s41 (AdamW twin of F20): done 2026-09-23; see the Optimizer paragraph in §4 (AdamW at 24 layers = Muon at 6 layers + linear input).
 - Longer base schedule (15 or 20 epochs of the F20 recipe): under discussion; "best = last epoch" is a property of the OneCycle schedule, not evidence either way, but the negative train–dev gaps suggest headroom.
 - Head-to-head with the Kaggle 2nd-place solution needs its predictions on batches 656–659 (on the cluster, not on this box).
 - 25 wandb runs from failed first-day attempts are listed in `logs/wandb_junk_runs_20260903.txt` (host brev-bmd5y2bkg); they can be deleted from the project.
