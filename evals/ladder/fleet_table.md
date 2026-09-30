@@ -121,3 +121,12 @@ Paired gains of the raw deep system over the July record recipe on identical eve
 | Two-model system, all events | 55.36 / 47.62 | 55.30 / 47.54 |
 
 Test tracks validation on the bulk to 0.07°. On ≥1000 pulses both models are ~0.35° worse on test than on validation (5.53 vs 5.15 finetuned; 6.07 vs 5.72 base), i.e. the test batches' bright events are intrinsically harder, within the ±0.2–0.3° sampling uncertainty of a 9k-event heavy-tailed mean; the finetune's gain over the base is the same on both sets (−0.54° test, −0.57° validation), so there is no sign of selection bias.
+
+## Errata (2026-09-30, audit on the cluster after salvage)
+
+The text above is kept as written on the box; these corrections apply.
+
+1. **Selected epoch column (hi-E finetunes).** Nine entries disagree with the `epoch` stored in the dev-selected `best.pt`: F01ft 10 → **7**, F04ft 10 → **9**, F10ft 8 → **9**, F13ft 8 → **7**, F15ft 8 → **7**, F18ft (≥1000) 9 → **4**, F18ft (≥500) 7 → **4**, F03ft (Muon lr 1.25e-4) 10 → **9**, F03ft (20 epochs) 15 → **12**. Locked-set and test numbers were computed from the actual `best.pt` files and are unaffected; the "dev (selected)" values of these rows may refer to the wrong epoch.
+2. **Hi-E selection rule, runner-up.** The rule compared F20ft ≥500 (22.4752° on ≥200) against F03ft **≥1000** (22.61°). The correct runner-up is its seed-17 twin F03ft **≥500** at 22.4714°, i.e. a 0.004° tie (paired Δ ≈ ±0.05°). Taken literally the rule selects F03ft ≥500 (test ≥1000: 5.57 / 0.91 vs 5.53 / 0.87; two-model system unchanged at 55.36°). Report both seeds.
+3. **Test scoring scope.** Contrary to rule 3, all other finished runs were also scored on 656–659 starting 07:44 UTC (after the headline evaluation, `evals/test_656_659/jobs.txt`), including F10ft. No selection above used those scores. F20ft_hi1000 and F21 were trained after this point (controls, not candidates).
+4. **"best = final epoch".** F21 (AdamW) selected a mid-epoch-10 checkpoint (batch_idx 101551 of ~126,950); 11 other base runs selected an intra-epoch-10 validation ≈0.01% before the end.
