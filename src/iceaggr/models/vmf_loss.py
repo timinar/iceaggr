@@ -97,6 +97,20 @@ def _kappa_from_raw(
     return torch.clamp(F.softplus(raw_kappa) + kappa_min, max=kappa_max)
 
 
+def _bounded_kappa_from_raw(
+    raw_kappa: torch.Tensor,
+    kappa_min: float,
+    kappa_max: float,
+    kappa_temperature: float,
+) -> torch.Tensor:
+    """Map unconstrained raw_kappa to [kappa_min, kappa_max] with smooth gradients."""
+    t = max(float(kappa_temperature), 1e-6)
+    span = float(kappa_max) - float(kappa_min)
+    if span <= 0:
+        raise ValueError("kappa_max must be greater than kappa_min")
+    return float(kappa_min) + span * torch.sigmoid(raw_kappa / t)
+
+
 # ---------------------------------------------------------------------------
 # VMF mixture loss
 # ---------------------------------------------------------------------------
